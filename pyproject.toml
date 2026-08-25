@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+[project]
+name = "info-yaml-validate-action"
+version = "0.0.0"
+description = "Validate INFO.yaml against a schema and its declared repository"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+dependencies = ["jsonschema>=4.23", "PyYAML>=6", "referencing>=0.36"]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+
+[tool.basedpyright]
+# Standard mode keeps error-level type checking while avoiding the
+# strict-only warnings (e.g. untyped third-party/pytest fixtures) that
+# would otherwise fail the basedpyright hook on the test suite.
+typeCheckingMode = "standard"
+# The basedpyright pre-commit mirror bundles its own runtime and sits
+# just under pre-commit.ci's 250 MiB per-hook tier limit, so it cannot
+# carry the project's runtime deps as additional_dependencies. Import
+# resolution is therefore relaxed here; mypy (which can afford the deps)
+# performs the import-aware checking instead.
+reportMissingImports = false
+reportMissingModuleSource = false

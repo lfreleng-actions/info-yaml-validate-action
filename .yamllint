@@ -4,6 +4,12 @@
 
 extends: default
 
+# Vendored verbatim from lfit/releng-global-jjb. Reformatting it to satisfy
+# a line-length rule would defeat the point of copying it unchanged, and
+# would make future comparison against upstream harder.
+ignore: |
+  schema/info-schema.yaml
+
 rules:
   empty-lines:
     max-end: 1
