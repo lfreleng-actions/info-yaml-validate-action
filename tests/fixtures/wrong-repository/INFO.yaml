@@ -1,0 +1,33 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Fixture: schema-valid, but declares a repository unrelated to the
+# project under test.
+project: "example-project"
+project_creation_date: "2026-01-01"
+project_category: ""
+lifecycle_state: "Incubation"
+project_lead: &lead
+  name: "Ada Lovelace"
+  email: "ada@example.org"
+  id: "ada"
+  company: "Example"
+  timezone: "Europe/London"
+primary_contact: *lead
+issue_tracking:
+  type: "jira"
+  url: "https://jira.example.org/browse/EXAMPLE"
+  key: "EXAMPLE"
+mailing_list:
+  type: "groups.io"
+  url: "https://lists.example.org"
+realtime_discussion:
+  type: "irc"
+  server: "irc.example.org"
+repositories:
+  - "somebody-elses-project"
+committers:
+  - *lead
+tsc:
+  approval: "https://example.org/tsc"
