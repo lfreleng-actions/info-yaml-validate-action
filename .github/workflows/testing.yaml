@@ -93,7 +93,7 @@ jobs:
       # A file that satisfies both checks.
       - name: "Running local action: valid INFO.yaml"
         id: valid
-        uses: ./
+        uses: $/
         with:
           path: "tests/fixtures/valid/INFO.yaml"
           project: "example-project"
@@ -128,7 +128,7 @@ jobs:
       # The ancestor rule: a subproject may name its parent project.
       - name: "Running local action: ancestor repository"
         id: ancestor
-        uses: ./
+        uses: $/
         with:
           path: "tests/fixtures/valid/INFO.yaml"
           project: "example-project/subcomponent"
@@ -148,7 +148,7 @@ jobs:
       # Schema violations must fail the step.
       - name: "Running local action: schema violations [expect failure]"
         id: bad_schema
-        uses: ./
+        uses: $/
         continue-on-error: true
         with:
           path: "tests/fixtures/invalid-schema/INFO.yaml"
@@ -165,7 +165,7 @@ jobs:
       # A mismatched repository must fail the step.
       - name: "Running local action: wrong repository [expect failure]"
         id: bad_repo
-        uses: ./
+        uses: $/
         continue-on-error: true
         with:
           path: "tests/fixtures/wrong-repository/INFO.yaml"
@@ -183,7 +183,7 @@ jobs:
       # proving the toggle acts on the repository check alone.
       - name: "Running local action: repository check disabled"
         id: no_repo_check
-        uses: ./
+        uses: $/
         with:
           path: "tests/fixtures/wrong-repository/INFO.yaml"
           require-repository-match: "false"
@@ -208,7 +208,7 @@ jobs:
       # A missing file must fail rather than pass vacuously.
       - name: "Running local action: absent file [expect failure]"
         id: absent
-        uses: ./
+        uses: $/
         continue-on-error: true
         with:
           path: "tests/fixtures/does-not-exist/INFO.yaml"
@@ -225,7 +225,7 @@ jobs:
       # A path escaping the workspace must be refused.
       - name: "Running local action: path traversal [expect failure]"
         id: traversal
-        uses: ./
+        uses: $/
         continue-on-error: true
         with:
           path: "../../../etc/hostname"
@@ -242,7 +242,7 @@ jobs:
       # A malformed boolean must fail rather than quietly disable the gate.
       - name: "Running local action: malformed boolean [expect failure]"
         id: typo
-        uses: ./
+        uses: $/
         continue-on-error: true
         with:
           path: "tests/fixtures/wrong-repository/INFO.yaml"
