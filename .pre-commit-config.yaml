@@ -7,6 +7,12 @@ ci:
   skip:
     - gha-workflow-linter
     - aislop
+    # basedpyright needs typing modules (the code imports jsonschema,
+    # referencing, PyYAML and pytest), and any additional_dependencies
+    # exceed pre-commit.ci's 250 MiB per-hook limit: the bare hook alone
+    # is 248.7 MiB. No workflow runs it either, so only local commits
+    # enforce it.
+    - basedpyright
   autofix_commit_msg: |
     Chore: Pre-commit autofixes
 
@@ -115,10 +121,30 @@ repos:
     hooks:
       - id: codespell
 
+  # Requires a mirror, primary repo lacks .pre-commit-hooks.yaml
   - repo: https://github.com/DetachHead/basedpyright-prek-mirror
     rev: 706e6acebe9e88c2c28d1527d3085a14b11794c4  # frozen: 1.40.1
     hooks:
       - id: basedpyright
+        # Fail on warnings as well as errors, over the same paths as
+        # [tool.basedpyright] include in pyproject.toml.
+        args: [--warnings, info_yaml, info_yaml_validate.py, tests]
+        # Scan those paths whole, so a staged change cannot hide a
+        # finding it causes in an unstaged file.
+        pass_filenames: false
+        # Run even when no Python is staged: deletions and config changes.
+        always_run: true
+        # Keep always_run from also firing the hook at commit-msg.
+        stages: [pre-commit]
+        # The packages the scanned code imports, at the uv.lock versions,
+        # plus stubs for the two that ship no type information.
+        additional_dependencies:
+          - jsonschema==4.26.0
+          - pytest==9.1.1
+          - PyYAML==6.0.3
+          - referencing==0.37.0
+          - types-jsonschema==4.26.0.20260518
+          - types-PyYAML==6.0.12.20260906
 
   - repo: https://github.com/lfreleng-actions/gha-workflow-linter
     rev: 0c582e431022f1c7004196fb4ea32744d1fe4843  # frozen: v1.7.0
