@@ -25,14 +25,10 @@ python_version = "3.10"
 warn_unused_ignores = true
 
 [tool.basedpyright]
-# Standard mode keeps error-level type checking while avoiding the
-# strict-only warnings (e.g. untyped third-party/pytest fixtures) that
-# would otherwise fail the basedpyright hook on the test suite.
+# The minimum from requires-python.
+pythonVersion = "3.10"
+pythonPlatform = "All"
 typeCheckingMode = "standard"
-# The basedpyright pre-commit mirror bundles its own runtime and sits
-# just under pre-commit.ci's 250 MiB per-hook tier limit, so it cannot
-# carry the project's runtime deps as additional_dependencies. Import
-# resolution is therefore relaxed here; mypy (which can afford the deps)
-# performs the import-aware checking instead.
-reportMissingImports = false
-reportMissingModuleSource = false
+# Matches the paths the pre-commit hook passes, so a bare basedpyright
+# run or an editor's language server analyses the same set.
+include = ["info_yaml", "info_yaml_validate.py", "tests"]
