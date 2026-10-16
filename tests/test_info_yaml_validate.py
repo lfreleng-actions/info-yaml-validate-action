@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import textwrap
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 import jsonschema
@@ -14,7 +17,7 @@ import pytest
 import yaml
 
 import info_yaml_validate as iyv
-from info_yaml import report
+from info_yaml import lint, report
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -210,6 +213,8 @@ def test_invalid_caller_schema_fails_before_the_document_is_checked() -> None:
         ("invalid-schema", False),
         ("missing-issue-tracking-keys", False),
         ("invalid-uri", False),
+        # Schema-valid on purpose: only yamllint should reject it.
+        ("lint-failure", True),
     ],
 )
 def test_fixture_schema_verdict(schema: Any, fixture: str, valid: bool) -> None:
@@ -786,3 +791,929 @@ def test_summary_records_a_skipped_repository_check() -> None:
     """A green result must say what it did not check."""
     result = report.Result(project="", repository_checked=False)
     assert "_skipped_" in report.render_summary(result, "INFO.yaml")
+
+
+# --------------------------------------------------------------------------
+# YAML lint stage
+# --------------------------------------------------------------------------
+
+LINT_FAILURE = FIXTURES / "lint-failure" / "INFO.yaml"
+# yamllint 'default' reports two colons errors in the fixture.
+LINT_FAILURE_ERRORS = 2
+
+
+def _run_main(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    info_text: str | None,
+    **inputs: str,
+) -> tuple[int, dict[str, str], str, str]:
+    """Run the entry point against a scratch workspace.
+
+    The workspace sits under tmp_path, so yamllint discovers no
+    configuration unless a test writes one, and falls back to 'default'.
+    ``info_text`` is written to INFO.yaml; ``None`` leaves whatever the
+    test placed there. Returns the exit code, the parsed outputs, the
+    summary and stdout.
+    """
+    if info_text is not None:
+        (workspace / "INFO.yaml").write_text(info_text, encoding="utf-8")
+    output = workspace.parent / "github-output"
+    summary = workspace.parent / "github-summary"
+    output.write_text("")
+    summary.write_text("")
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(workspace))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("INPUT_PATH", "INFO.yaml")
+    monkeypatch.setenv("INPUT_PROJECT", "example-project")
+    monkeypatch.delenv("INPUT_SCHEMA_PATH", raising=False)
+    monkeypatch.delenv("INPUT_REQUIRE_REPOSITORY_MATCH", raising=False)
+    monkeypatch.delenv("INPUT_LINT_YAML", raising=False)
+    for key, value in inputs.items():
+        monkeypatch.setenv(f"INPUT_{key.upper()}", value)
+    code = iyv.main()
+    records = _parse_output_records(output.read_text())
+    return code, records, summary.read_text(), capsys.readouterr().out
+
+
+@pytest.fixture
+def workspace(tmp_path: Path) -> Path:
+    """An empty workspace directory beneath tmp_path."""
+    path = tmp_path / "workspace"
+    path.mkdir()
+    return path
+
+
+def test_lint_findings_fail_a_schema_valid_file(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert records["lint-error-count"] == str(LINT_FAILURE_ERRORS)
+    assert records["schema-error-count"] == "0"
+    assert "::error file=INFO.yaml,line=8,col=10" in out
+
+
+def test_repository_yamllint_config_is_honoured(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """'relaxed' demotes the colons rule to a warning, which does not fail."""
+    (workspace / ".yamllint").write_text("---\nextends: relaxed\n")
+    code, records, summary, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert records["valid"] == "true"
+    assert records["lint-error-count"] == "0"
+    assert "::warning file=INFO.yaml,line=8,col=10" in out
+    assert "`.yamllint`" in summary
+
+
+@pytest.mark.parametrize("name", [".yamllint.yaml", ".yamllint.yml"])
+def test_alternative_yamllint_config_names_are_found(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+) -> None:
+    (workspace / name).write_text("---\nextends: relaxed\n")
+    code, records, _, _ = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert records["lint-error-count"] == "0"
+
+
+def test_disabled_lint_stage_is_skipped_and_recorded(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, records, summary, out = _run_main(
+        workspace,
+        monkeypatch,
+        capsys,
+        LINT_FAILURE.read_text(encoding="utf-8"),
+        lint_yaml="false",
+    )
+    assert code == 0
+    assert records["valid"] == "true"
+    assert records["lint-error-count"] == "0"
+    assert "| YAML lint | _skipped_ |" in summary
+    assert "YAML lint skipped by request" in out
+
+
+def test_unrecognised_lint_yaml_value_fails(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    code, records, _, out = _run_main(
+        workspace,
+        monkeypatch,
+        capsys,
+        LINT_FAILURE.read_text(encoding="utf-8"),
+        lint_yaml="enabled",
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "lint-yaml" in out
+
+
+def test_lint_warnings_are_reported_but_do_not_fail(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Dropping the '---' leaves a single document-start warning."""
+    text = (FIXTURES / "valid" / "INFO.yaml").read_text(encoding="utf-8")
+    code, records, summary, out = _run_main(
+        workspace, monkeypatch, capsys, text.removeprefix("---\n")
+    )
+    assert code == 0
+    assert records["valid"] == "true"
+    assert records["lint-error-count"] == "0"
+    assert "::warning file=INFO.yaml,line=5,col=1" in out
+    assert "document-start" in summary
+
+
+def test_unparsable_file_reports_the_lint_finding(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Lint runs first, so a syntax error arrives as a located finding."""
+    code, records, summary, out = _run_main(
+        workspace, monkeypatch, capsys, "---\nproject: [unclosed\n"
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert records["lint-error-count"] == "1"
+    assert "::error file=INFO.yaml,line=" in out
+    assert "syntax error" in out
+    assert "is not valid YAML" not in out
+    assert "_not run: the file is not valid YAML_" in summary
+
+
+def test_symlinked_yamllint_config_cannot_escape(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    escape_target: Path,
+) -> None:
+    (workspace / ".yamllint").symlink_to(escape_target)
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "outside the workspace" in out
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        "---\nextends: {target}\n",
+        "---\nextends: default\nignore-from-file: {target}\n",
+        "---\nextends: default\nrules:\n  colons:\n    ignore-from-file: {target}\n",
+    ],
+)
+def test_yamllint_config_cannot_read_outside_the_workspace(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    escape_target: Path,
+    config: str,
+) -> None:
+    """yamllint reads 'extends' and 'ignore-from-file' paths verbatim."""
+    (workspace / ".yamllint").write_text(config.format(target=escape_target))
+    code, _, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert "outside the workspace" in out
+
+
+def test_yamllint_config_may_extend_a_file_in_the_workspace(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (workspace / "lint").mkdir()
+    (workspace / "lint" / "base.yaml").write_text("---\nextends: relaxed\n")
+    (workspace / ".yamllint").write_text("---\nextends: lint/base.yaml\n")
+    code, records, _, _ = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert records["lint-error-count"] == "0"
+
+
+def test_invalid_yamllint_config_fails_loudly(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (workspace / ".yamllint").write_text("---\nrules:\n  no-such-rule: enable\n")
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "yamllint rejected its configuration" in out
+    assert 'no such rule: "no-such-rule"' in out
+
+
+@pytest.mark.parametrize("indirect", [False, True], ids=["direct", "via-extends"])
+def test_non_utf8_yamllint_config_is_refused(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    escape_target: Path,
+    indirect: bool,
+) -> None:
+    """yamllint decodes other encodings itself and would follow unchecked paths.
+
+    The containment preflight reads UTF-8. A UTF-16 configuration naming
+    an external 'extends' used to slip past it, because the preflight gave
+    up on the decode error while yamllint went on to load the file. It
+    must fail closed instead, whether the encoded file is the
+    configuration itself or one it extends.
+    """
+    encoded = f"---\nextends: {escape_target}\n".encode("utf-16")
+    if indirect:
+        (workspace / "lint").mkdir()
+        (workspace / "lint" / "base.yaml").write_bytes(encoded)
+        (workspace / ".yamllint").write_text("---\nextends: lint/base.yaml\n")
+    else:
+        (workspace / ".yamllint").write_bytes(encoded)
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "is not UTF-8" in out
+    assert str(escape_target) not in out
+
+
+@pytest.mark.parametrize("value", ["null", "false", "[default]", "{a: b}"])
+def test_non_string_extends_is_reported_not_raised(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    value: str,
+) -> None:
+    """yamllint raises TypeError on a non-string 'extends'; that must not escape."""
+    (workspace / ".yamllint").write_text(f"---\nextends: {value}\n")
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "'extends' value" in out
+    assert "Traceback" not in out
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        pytest.param("strict", "could not be read", id="unknown-bare-name"),
+        pytest.param("..", "outside the workspace", id="parent-directory"),
+    ],
+)
+def test_extends_outside_the_bundled_set_is_a_workspace_path(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+    expected: str,
+) -> None:
+    """Only 'default' and 'relaxed' are bundled; any other name is a path.
+
+    The bundled set is fixed in this code rather than read from the
+    installed yamllint, so a name it does not know falls to the path
+    branch and is contained in the workspace: fail closed, never a read
+    of whatever yamllint's lookup might find.
+    """
+    (workspace / ".yamllint").write_text(f"---\nextends: {name}\n")
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert expected in out
+
+
+# yamllint's bundled-configuration lookup joins '<name>.yaml' onto its conf
+# directory with os.path.join semantics. The containment preflight must
+# refuse any name whose lookup leaves that directory, and pathlib's pure
+# Windows paths let the Windows semantics run on any host. The stand-in
+# directory has no drive, so a drive-relative name counts as leaving.
+@pytest.mark.parametrize(
+    ("name", "leaves"),
+    [
+        pytest.param("default", False, id="bare-name"),
+        pytest.param("..", False, id="dots-become-a-filename"),
+        pytest.param("C:relative", True, id="drive-relative-unknown-drive"),
+        pytest.param(r"C:\ws\base", True, id="absolute-drive-path"),
+        pytest.param("D:relative", True, id="other-drive"),
+        pytest.param(r"..\outside", True, id="backslash-traversal"),
+        pytest.param(r"\\server\share\x", True, id="unc-path"),
+        pytest.param(r"sub\x", True, id="backslash-subdirectory"),
+    ],
+)
+def test_bundled_lookup_escape_detection_on_windows(name: str, leaves: bool) -> None:
+    conf = PureWindowsPath("yamllint", "conf")
+    assert lint._leaves_bundled_dir(name, conf) is leaves
+
+
+def test_bundled_lookup_cannot_leave_the_conf_dir_on_posix() -> None:
+    """Without a '/' a POSIX name is one component; the slash test covers the rest."""
+    conf = PurePosixPath("yamllint", "conf")
+    for name in ("default", "..", r"C:\ws\base", r"..\outside", "C:relative"):
+        assert lint._leaves_bundled_dir(name, conf) is False
+
+
+def test_extends_that_escapes_the_bundled_lookup_is_refused(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    escape_target: Path,
+) -> None:
+    """An 'extends' yamllint would resolve outside its conf directory fails closed.
+
+    With 'extends: C:\\ws\\base' on Windows, the preflight would contain
+    and inspect 'base' while yamllint's lookup opened the sibling
+    'base.yaml', so a benign 'base' beside a 'base.yaml' that reaches
+    outside the workspace would pass the preflight and run unchecked.
+    The escape itself needs Windows path semantics, so the detector is
+    stood in for here; what this pins is the integrated outcome: the run
+    fails with the failure outputs written, before yamllint loads
+    anything, and the sibling is never read.
+    """
+    monkeypatch.setattr(lint, "_leaves_bundled_dir", lambda name, *a: True)
+    (workspace / "base").write_text("---\nextends: relaxed\n")
+    (workspace / "base.yaml").write_text(f"---\nextends: {escape_target}\n")
+    (workspace / ".yamllint").write_text("---\nextends: base\n")
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "neither a bundled configuration name nor a path" in out
+    assert str(escape_target) not in out
+
+
+def test_warning_carrying_the_syntax_suffix_does_not_skip_the_checks(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Document text in yamllint's output must not pass for a parse verdict.
+
+    key-duplicates prints the duplicated key, and a key holding a newline
+    splits that record so its first line ends in '(syntax)'. With the
+    rule demoted to a warning by the repository's own configuration, the
+    report passes the exit-status check with no errors; taking the line
+    for a syntax error would switch off the schema and repository checks
+    and report the file valid. yamllint reports syntax errors at error
+    level alone, so a warning never stands for one.
+    """
+    (workspace / ".yamllint").write_text(
+        "---\nextends: default\nrules:\n  key-duplicates:\n    level: warning\n"
+    )
+    key = '"a (syntax)\\nINFO.yaml:1:1: [warning] b"'
+    code, records, summary, out = _run_main(
+        workspace, monkeypatch, capsys, f"---\n{key}: 1\n{key}: 2\n"
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert records["lint-error-count"] == "0"
+    assert records["schema-error-count"] != "0"
+    assert "_not run: the file is not valid YAML_" not in summary
+    assert "::warning file=INFO.yaml,line=3,col=1" in out
+
+
+def test_multiline_warning_is_one_finding_and_does_not_fail(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A duplicated key holding a newline is printed decoded, across two lines.
+
+    The record is one warning, so a schema-valid document with that
+    duplication, and key-duplicates demoted to a warning, must pass
+    rather than be refused as unreadable output.
+    """
+    (workspace / ".yamllint").write_text(
+        "---\nextends: default\nrules:\n  key-duplicates:\n    level: warning\n"
+    )
+    text = (FIXTURES / "valid" / "INFO.yaml").read_text(encoding="utf-8")
+    code, records, summary, out = _run_main(
+        workspace, monkeypatch, capsys, text + '"a\\nb": 1\n"a\\nb": 2\n'
+    )
+    assert code == 0
+    assert records["valid"] == "true"
+    assert records["lint-error-count"] == "0"
+    assert out.count("::warning ") == 1
+    assert "key-duplicates" in summary
+
+
+def test_parse_report_joins_lines_until_a_rule_closes_the_record() -> None:
+    findings, unparsed = lint._parse_report(
+        'a.yaml:3:1: [warning] duplication of key "a\nb" in mapping (key-duplicates)\n'
+        "a.yaml:4:1: [error] too many spaces after colon (colons)\n"
+    )
+    assert [(f.line, f.level, f.rule) for f in findings] == [
+        (3, "warning", "key-duplicates"),
+        (4, "error", "colons"),
+    ]
+    assert findings[0].message == 'duplication of key "a\nb" in mapping'
+    assert unparsed is None
+    assert lint._parse_report("a.yaml:1:1: [warning] never closes\n")[1]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        pytest.param('---\nextends: "\\0"\n', id="extends"),
+        pytest.param(
+            '---\nextends: default\nignore-from-file: "\\0"\n', id="ignore-from-file"
+        ),
+        pytest.param(
+            '---\nextends: default\nrules:\n  colons:\n    ignore-from-file: "\\0"\n',
+            id="rule-ignore-from-file",
+        ),
+    ],
+)
+def test_nul_byte_in_a_config_path_is_reported_not_raised(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    config: str,
+) -> None:
+    """The preflight hands decoded YAML strings to the resolver.
+
+    A NUL byte spelt as an escape raises ValueError from ``resolve()``
+    before containment can judge it; that must surface as a reported
+    failure with the outputs written, not a traceback.
+    """
+    (workspace / ".yamllint").write_text(config)
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "cannot be resolved" in out
+    assert "Traceback" not in out
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        pytest.param(".yamllint", id="lint-config"),
+        pytest.param("INFO.yaml", id="path"),
+    ],
+)
+def test_symlink_loop_is_reported_not_raised(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    name: str,
+) -> None:
+    """A self-referential link must fail the run with the outputs written.
+
+    ``Path.resolve()`` raises RuntimeError for a loop on Python 3.10 to
+    3.12 and returns the link unresolved on 3.13 and later; either way
+    the run used to continue past containment with a traceback, or with
+    the configuration quietly treated as absent.
+    """
+    if name != "INFO.yaml":
+        (workspace / "INFO.yaml").write_text(LINT_FAILURE.read_text(encoding="utf-8"))
+    (workspace / name).symlink_to(name)
+    code, records, _, out = _run_main(workspace, monkeypatch, capsys, None)
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "cannot be resolved" in out
+    assert "symbolic link" in out or "Symlink loop" in out
+
+
+@pytest.mark.parametrize(
+    ("config", "expect_error"),
+    [
+        pytest.param("", True, id="default-unix-rule-flags-crlf"),
+        pytest.param(
+            "---\nextends: default\nrules:\n  new-lines:\n    type: dos\n",
+            False,
+            id="dos-rule-accepts-crlf",
+        ),
+    ],
+)
+def test_crlf_line_endings_reach_yamllint_unchanged(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    config: str,
+    expect_error: bool,
+) -> None:
+    """yamllint reads the file itself, so CRLF endings reach 'new-lines' as written."""
+    if config:
+        (workspace / ".yamllint").write_text(config)
+    text = (FIXTURES / "valid" / "INFO.yaml").read_text(encoding="utf-8")
+    crlf = text.replace("\n", "\r\n")
+    # _run_main writes with text-mode translation, so write the bytes here
+    # and hand it text it will rewrite identically.
+    (workspace / "INFO.yaml").write_bytes(crlf.encode("utf-8"))
+    monkeypatch.setattr(Path, "write_text", lambda self, *a, **k: None)
+    code, records, _, out = _run_main(workspace, monkeypatch, capsys, crlf)
+    assert (workspace / "INFO.yaml").read_bytes() == crlf.encode("utf-8")
+    if expect_error:
+        assert code == 1
+        assert records["lint-error-count"] == "1"
+        assert "new-lines" in out
+    else:
+        assert code == 0
+        assert records["lint-error-count"] == "0"
+        assert records["schema-error-count"] == "0"
+
+
+def test_syntax_error_survives_a_missing_project_source(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The lint verdict must not be lost to a later prerequisite failing.
+
+    With no 'project' input and no .gitreview, project resolution raises.
+    That used to run before the syntax-error guard, so the run reported
+    the missing project and published 'lint-error-count=0' for a file
+    that does not parse.
+    """
+    code, records, summary, out = _run_main(
+        workspace, monkeypatch, capsys, "---\nproject: [unclosed\n", project=""
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert records["lint-error-count"] == "1"
+    assert "::error file=INFO.yaml,line=" in out
+    assert "no .gitreview file was found" not in out
+    assert "_not run: the file is not valid YAML_" in summary
+
+
+def test_syntax_error_survives_an_unreadable_schema(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (workspace / "schema.yaml").write_text("---\n: [not a schema\n")
+    code, records, _, out = _run_main(
+        workspace,
+        monkeypatch,
+        capsys,
+        "---\nproject: [unclosed\n",
+        schema_path="schema.yaml",
+    )
+    assert code == 1
+    assert records["lint-error-count"] == "1"
+    assert "::error file=INFO.yaml,line=" in out
+    assert "Schema" not in out
+
+
+def test_document_the_yaml_reader_refuses_is_reported(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A NUL byte makes yamllint raise rather than report; the run must say so."""
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, "---\nproject: 'a\x00b'\n"
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert records["lint-error-count"] == "0"
+    assert "yamllint failed on 'INFO.yaml'" in out
+    assert "unacceptable character" in out
+
+
+def test_unparsable_rule_regex_in_config_is_reported(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """yamllint compiles 'ignored-keys' when the rule first runs, not on load."""
+    (workspace / ".yamllint").write_text(
+        "---\nextends: default\nrules:\n  key-ordering:\n    ignored-keys: ['[']\n"
+    )
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "yamllint failed on 'INFO.yaml'" in out
+    assert "unterminated character set" in out
+
+
+KEY_ORDER_DOC = "---\nhair: 1\nhaïr: 2\nhais: 3\n"
+KEY_ORDER_CONFIG = "---\nextends: default\nrules:\n  key-ordering: enable\n"
+
+
+def _has_locale(name: str) -> bool:
+    import locale
+
+    previous = locale.setlocale(locale.LC_COLLATE)
+    try:
+        locale.setlocale(locale.LC_COLLATE, name)
+    except locale.Error:
+        return False
+    finally:
+        locale.setlocale(locale.LC_COLLATE, previous)
+    return True
+
+
+@pytest.mark.skipif(
+    not _has_locale("en_US.UTF-8"), reason="en_US.UTF-8 locale not installed"
+)
+@pytest.mark.parametrize(
+    ("locale_line", "errors"),
+    [
+        pytest.param("", "1", id="c-collation"),
+        pytest.param("locale: en_US.UTF-8\n", "0", id="configured-locale"),
+    ],
+)
+def test_configured_locale_drives_key_ordering(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    locale_line: str,
+    errors: str,
+) -> None:
+    """The yamllint command applies the configuration's 'locale' itself.
+
+    Under C collation 'haïr' sorts after 'hais' and key-ordering fires;
+    under en_US.UTF-8 the three keys are in order. Running the command
+    rather than the library is what makes the setting take effect.
+    """
+    (workspace / ".yamllint").write_text(KEY_ORDER_CONFIG + locale_line)
+    _, records, _, _ = _run_main(workspace, monkeypatch, capsys, KEY_ORDER_DOC)
+    assert records["lint-error-count"] == errors
+
+
+def test_unsupported_locale_is_reported(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (workspace / ".yamllint").write_text(
+        "---\nextends: default\nlocale: xx_NOPE.UTF-8\n"
+    )
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "yamllint failed on 'INFO.yaml'" in out
+    assert "unsupported locale setting" in out
+
+
+def test_missing_yamllint_command_is_reported(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The command is installed by the action, not imported; its absence is an error."""
+    monkeypatch.delenv("YAMLLINT_ENV_DIR", raising=False)
+    monkeypatch.setattr(lint.shutil, "which", lambda _name: None)
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "'yamllint' is not on PATH" in out
+
+
+def _fake_yamllint(directory: Path, marker: str) -> Path:
+    """An executable that reports one warning naming where it came from."""
+    script = directory / "yamllint"
+    script.write_text(
+        f"#!/bin/sh\nprintf 'INFO.yaml:1:1: [warning] {marker} (truthy)\\n'\n"
+    )
+    script.chmod(0o755)
+    return script
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="shell-script stand-ins")
+@pytest.mark.parametrize("sub", ["bin", "Scripts"])
+def test_env_dir_executable_wins_over_the_checkout_and_path(
+    workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    sub: str,
+) -> None:
+    """With YAMLLINT_ENV_DIR set, nothing on PATH or in the checkout is consulted.
+
+    The validate step runs from the checkout under test. On Windows
+    ``shutil.which`` searches the current directory, so a repository
+    shipping a ``yamllint.exe`` could replace the pinned tool; the fix
+    is to take the executable from the synced environment by absolute
+    path, so the same test holds on every platform with a PATH entry
+    standing in for the current-directory search. The environment
+    keeps its executables under ``bin`` on POSIX and ``Scripts`` on
+    Windows; both layouts are accepted.
+    """
+    env_dir = tmp_path / "lint"
+    (env_dir / sub).mkdir(parents=True)
+    _fake_yamllint(env_dir / sub, "from-env-dir")
+    _fake_yamllint(workspace, "from-checkout")
+    monkeypatch.setenv("PATH", f"{workspace}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("YAMLLINT_ENV_DIR", str(env_dir))
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert records["valid"] == "true"
+    assert "from-env-dir" in out
+    assert "from-checkout" not in out
+
+
+def test_empty_env_dir_does_not_fall_back_to_path(
+    workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    env_dir = tmp_path / "lint"
+    (env_dir / "bin").mkdir(parents=True)
+    monkeypatch.setenv("YAMLLINT_ENV_DIR", str(env_dir))
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert "'yamllint' was not found in YAMLLINT_ENV_DIR" in out
+
+
+def test_file_encoding_override_cannot_redirect_the_preflight(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    escape_target: Path,
+) -> None:
+    """yamllint must decode the configuration the way the preflight did.
+
+    yamllint honours ``YAMLLINT_FILE_ENCODING`` for every file it opens.
+    Under ``unicode_escape`` an 'extends' written as ``\\x2ftmp\\x2f...``
+    names a benign workspace file to the preflight, which reads UTF-8,
+    and a file outside the workspace to yamllint. The child must not
+    inherit the variable.
+    """
+    escape_target.write_text("---\nrules:\n  no-such-rule: enable\n")
+    escaped = str(escape_target).replace("/", "\\x2f")
+    (workspace / escaped).write_text("---\nextends: relaxed\n")
+    (workspace / ".yamllint").write_text(f"---\nextends: {escaped}\n")
+    monkeypatch.setenv("YAMLLINT_FILE_ENCODING", "unicode_escape")
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert records["valid"] == "true"
+    assert "no-such-rule" not in out
+
+
+def _completed(
+    returncode: int, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(["yamllint"], returncode, stdout, stderr)
+
+
+def test_crash_after_a_partial_report_is_not_a_verdict(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """yamllint prints findings as it goes, so a crash can follow some of them.
+
+    The exit status then matches what an error-level finding produces,
+    and the partial report would pass for a complete one. The traceback
+    on stderr is what tells the two apart.
+    """
+    partial = _completed(
+        1,
+        stdout="INFO.yaml:8:10: [error] too many spaces after colon (colons)\n",
+        stderr="Traceback (most recent call last):\n  ...\nre.error: boom\n",
+    )
+    monkeypatch.setattr(lint.subprocess, "run", lambda *a, **k: partial)
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+    assert records["lint-error-count"] == "0"
+    assert "yamllint failed on 'INFO.yaml': re.error: boom" in out
+
+
+@pytest.mark.parametrize(
+    "completed",
+    [
+        pytest.param(_completed(0, stdout="not a finding\n"), id="unreadable-line"),
+        pytest.param(_completed(1), id="error-status-without-errors"),
+        pytest.param(
+            _completed(0, stdout="INFO.yaml:1:1: [error] x (colons)\n"),
+            id="clean-status-with-errors",
+        ),
+        pytest.param(_completed(2), id="unexpected-status"),
+    ],
+)
+def test_report_and_status_must_agree(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    completed: subprocess.CompletedProcess[str],
+) -> None:
+    """Output the action cannot account for fails the run rather than a guess."""
+    monkeypatch.setattr(lint.subprocess, "run", lambda *a, **k: completed)
+    code, records, _, _ = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 1
+    assert records["valid"] == "false"
+
+
+def test_syntax_finding_keeps_yamllint_wording_without_a_rule() -> None:
+    """'(syntax)' is part of yamllint's description, not a rule identifier."""
+    finding = lint._parse_finding(
+        "INFO.yaml:2:7: [error] syntax error: expected ',' or ']' (syntax)"
+    )
+    assert finding == report.LintFinding(
+        line=2,
+        column=7,
+        level="error",
+        rule=None,
+        message="syntax error: expected ',' or ']' (syntax)",
+    )
+    ruled = lint._parse_finding(
+        "INFO.yaml:2:81: [error] line too long (98 > 80 characters) (line-length)"
+    )
+    assert ruled is not None
+    assert (ruled.rule, ruled.message) == (
+        "line-length",
+        "line too long (98 > 80 characters)",
+    )
+
+
+def test_lint_errors_invalidate_the_result() -> None:
+    error = report.LintFinding(
+        line=1, column=1, level="error", rule="colons", message="x"
+    )
+    warning = report.LintFinding(
+        line=1, column=1, level="warning", rule="truthy", message="x"
+    )
+    assert not report.Result(project="example", lint_findings=[error]).valid
+    assert report.Result(project="example", lint_findings=[warning]).valid
+
+
+def test_failure_outputs_publish_a_zero_lint_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = tmp_path / "output"
+    output.write_text("")
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    report.write_failure_outputs()
+    assert "lint-error-count=0" in output.read_text()
+
+
+def test_summary_renders_lint_findings_as_code_spans() -> None:
+    finding = report.LintFinding(
+        line=3, column=5, level="error", rule=None, message="[x](https://x.test)"
+    )
+    result = report.Result(project="example", lint_findings=[finding])
+    rendered = report.render_summary(result, "INFO.yaml")
+    assert "### YAML lint findings" in rendered
+    assert "`3:5 [error] [x](https://x.test)`" in rendered
+
+
+def test_lint_annotation_cannot_issue_a_workflow_command(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    finding = report.LintFinding(
+        line=1, column=1, level="error", rule="x", message="a\n::warning::forged"
+    )
+    iyv.emit(report.Result(project="example", lint_findings=[finding]), "INFO.yaml")
+    commands = [
+        line
+        for line in capsys.readouterr().out.splitlines()
+        if line.lstrip().startswith("::")
+    ]
+    assert commands
+    for line in commands:
+        assert line.startswith("::error file=INFO.yaml,line=1,col=1"), line

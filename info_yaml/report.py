@@ -23,6 +23,26 @@ from dataclasses import dataclass, field
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
+@dataclass(frozen=True)
+class LintFinding:
+    """One yamllint problem, detached from yamllint's own types.
+
+    ``rule`` is ``None`` for a syntax error, which yamllint reports
+    without a rule identifier.
+    """
+
+    line: int
+    column: int
+    level: str
+    rule: str | None
+    message: str
+
+    def describe(self) -> str:
+        """Render as ``line:column [level] message (rule)``."""
+        rule = f" ({self.rule})" if self.rule else ""
+        return f"{self.line}:{self.column} [{self.level}] {self.message}{rule}"
+
+
 @dataclass
 class Result:
     """Outcome of a validation run."""
@@ -32,11 +52,28 @@ class Result:
     schema_errors: list[str] = field(default_factory=list)
     repository_errors: list[str] = field(default_factory=list)
     repository_checked: bool = True
+    lint_findings: list[LintFinding] = field(default_factory=list)
+    lint_checked: bool = True
+    # The yamllint configuration applied: a workspace file name, or
+    # 'default' when the workspace carries none.
+    lint_config: str = "default"
+    # False when the file did not parse, so the schema and repository
+    # checks had nothing to examine.
+    parsed: bool = True
+
+    @property
+    def lint_errors(self) -> list[LintFinding]:
+        """Lint findings at ``error`` level; warnings do not fail a run."""
+        return [item for item in self.lint_findings if item.level == "error"]
 
     @property
     def valid(self) -> bool:
-        """True when neither check produced a finding."""
-        return not self.schema_errors and not self.repository_errors
+        """True when no enabled check produced a failing finding."""
+        return (
+            not self.lint_errors
+            and not self.schema_errors
+            and not self.repository_errors
+        )
 
 
 def append_to_env_file(env_var: str, content: str) -> None:
@@ -115,6 +152,7 @@ def write_outputs(result: Result) -> None:
     lines = [
         f"valid={str(result.valid).lower()}\n",
         f"schema-error-count={len(result.schema_errors)}\n",
+        f"lint-error-count={len(result.lint_errors)}\n",
         *_multiline("project", result.project, delimiter),
         *_multiline("repositories", "\n".join(result.repositories), delimiter),
     ]
@@ -133,6 +171,7 @@ def write_failure_outputs() -> None:
     lines = [
         "valid=false\n",
         "schema-error-count=0\n",
+        "lint-error-count=0\n",
         *_multiline("project", "", delimiter),
         *_multiline("repositories", "", delimiter),
     ]
@@ -156,11 +195,22 @@ def render_summary(result: Result, info_path: str) -> str:
     repositories_cell = (
         "<br>".join(_cell(entry) for entry in result.repositories) or "_none declared_"
     )
-    repository_check = (
-        f"{len(result.repository_errors)} finding(s)"
-        if result.repository_checked
-        else "_skipped_"
-    )
+    not_run = "_not run: the file is not valid YAML_"
+    if not result.parsed:
+        repository_check = not_run
+    elif result.repository_checked:
+        repository_check = f"{len(result.repository_errors)} finding(s)"
+    else:
+        repository_check = "_skipped_"
+    if result.lint_checked:
+        warnings = len(result.lint_findings) - len(result.lint_errors)
+        lint_check = (
+            f"{len(result.lint_errors)} error(s), {warnings} warning(s); "
+            f"config {_cell(result.lint_config)}"
+        )
+    else:
+        lint_check = "_skipped_"
+    schema_check = str(len(result.schema_errors)) if result.parsed else not_run
     rows = [
         "## 📋 INFO.yaml Validation",
         "",
@@ -171,10 +221,15 @@ def render_summary(result: Result, info_path: str) -> str:
         f"| File | {_cell(info_path)} |",
         f"| Project | {_cell(result.project) if result.project else '_not resolved_'} |",
         f"| Declared repositories | {repositories_cell} |",
-        f"| Schema findings | {len(result.schema_errors)} |",
+        f"| YAML lint | {lint_check} |",
+        f"| Schema findings | {schema_check} |",
         f"| Repository check | {repository_check} |",
         "",
     ]
+    if result.lint_findings:
+        rows.extend(["### YAML lint findings", ""])
+        rows.extend(f"- {_cell(item.describe())}" for item in result.lint_findings)
+        rows.append("")
     if result.schema_errors:
         rows.extend(["### Schema findings", ""])
         rows.extend(f"- {_cell(item)}" for item in result.schema_errors)

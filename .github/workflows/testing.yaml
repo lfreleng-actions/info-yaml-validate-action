@@ -205,6 +205,57 @@ jobs:
           fi
           echo "Repository check skipped as requested ✅"
 
+      # A schema-valid file that breaks yamllint must fail the step.
+      - name: "Running local action: yamllint findings [expect failure]"
+        id: bad_lint
+        uses: $/
+        continue-on-error: true
+        with:
+          path: "tests/fixtures/lint-failure/INFO.yaml"
+          project: "example-project"
+
+      - name: "Verify the lint findings failed the step"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.bad_lint.outcome }}
+          VALID: ${{ steps.bad_lint.outputs.valid }}
+          LINT_ERRORS: ${{ steps.bad_lint.outputs.lint-error-count }}
+          SCHEMA_ERRORS: ${{ steps.bad_lint.outputs.schema-error-count }}
+        run: |
+          # Verify the lint findings failed the step
+          if [ "$OUTCOME" = "success" ] || [ "$VALID" != "false" ]; then
+            echo "Error: yamllint findings were reported as valid ❌"
+            exit 1
+          fi
+          if [ "$LINT_ERRORS" != "2" ] || [ "$SCHEMA_ERRORS" != "0" ]; then
+            echo "Error: expected 2 lint and 0 schema errors," \
+              "got '$LINT_ERRORS' and '$SCHEMA_ERRORS' ❌"
+            exit 1
+          fi
+          echo "yamllint findings failed the step ✅"
+
+      # The same file passes with the lint stage switched off.
+      - name: "Running local action: lint stage disabled"
+        id: no_lint
+        uses: $/
+        with:
+          path: "tests/fixtures/lint-failure/INFO.yaml"
+          project: "example-project"
+          lint-yaml: "false"
+
+      - name: "Verify the disabled lint stage passed"
+        shell: bash
+        env:
+          VALID: ${{ steps.no_lint.outputs.valid }}
+          LINT_ERRORS: ${{ steps.no_lint.outputs.lint-error-count }}
+        run: |
+          # Verify the disabled lint stage passed
+          if [ "$VALID" != "true" ] || [ "$LINT_ERRORS" != "0" ]; then
+            echo "Error: lint-yaml: false should skip the lint stage ❌"
+            exit 1
+          fi
+          echo "Lint stage skipped as requested ✅"
+
       # A missing file must fail rather than pass vacuously.
       - name: "Running local action: absent file [expect failure]"
         id: absent

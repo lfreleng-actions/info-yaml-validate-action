@@ -4,8 +4,9 @@
 
 name: "📋 INFO.yaml Validate"
 description: >
-  Validate an INFO.yaml file against a JSON schema and verify that the
-  repositories it declares match the project it describes.
+  Lint an INFO.yaml file with yamllint, validate it against a JSON schema
+  and verify that the repositories it declares match the project it
+  describes.
 
 inputs:
   path:
@@ -36,13 +37,23 @@ inputs:
       schema validation alone.
     required: false
     default: "true"
+  lint-yaml:
+    description: >
+      When 'true' (default), run yamllint over the INFO.yaml before schema
+      validation, using the workspace's .yamllint, .yamllint.yaml or
+      .yamllint.yml, or yamllint's 'default' configuration when none
+      exists. Error-level findings fail the step; warnings do not. Set to
+      'false' to skip the lint stage.
+    required: false
+    default: "true"
 
 outputs:
   valid:
     description: >
-      'true' when every enabled check passed, otherwise 'false'. With
-      'require-repository-match' set to false only schema conformance
-      runs, so 'true' reports on that check alone.
+      'true' when every enabled check passed, otherwise 'false'. A
+      check switched off through 'lint-yaml' or
+      'require-repository-match' does not run, so 'true' reports on the
+      remaining checks alone.
     value: ${{ steps.validate.outputs.valid }}
   project:
     description: >
@@ -56,6 +67,11 @@ outputs:
   schema-error-count:
     description: "Number of schema violations found."
     value: ${{ steps.validate.outputs.schema-error-count }}
+  lint-error-count:
+    description: >
+      Number of error-level yamllint findings; '0' when the lint stage
+      was skipped.
+    value: ${{ steps.validate.outputs.lint-error-count }}
 
 runs:
   using: "composite"
@@ -65,6 +81,22 @@ runs:
       uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       with:
         version: "0.11.23"
+    - name: "Install yamllint"
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        # yamllint is GPL-3.0 licensed, so it is installed on its own and
+        # run as a separate process; the validator imports nothing from
+        # it, and the script lock it runs under does not list it. The
+        # 'lint' dependency group holds it, so the install is locked and
+        # hash-checked through uv.lock, which Dependabot keeps current.
+        # A private environment: the install neither collides with nor
+        # overwrites a yamllint the runner already has.
+        UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/info-yaml-validate/lint
+      run: |
+        # Install the locked yamllint into a private environment
+        uv sync --locked --only-group lint --no-install-project \
+          --project "${ACTION_PATH}"
     - name: "Validate INFO.yaml"
       id: validate
       shell: bash
@@ -73,7 +105,12 @@ runs:
         INPUT_PROJECT: ${{ inputs.project }}
         INPUT_SCHEMA_PATH: ${{ inputs.schema-path }}
         INPUT_REQUIRE_REPOSITORY_MATCH: ${{ inputs.require-repository-match }}
+        INPUT_LINT_YAML: ${{ inputs.lint-yaml }}
         ACTION_PATH: ${{ github.action_path }}
+        # The validator takes yamllint from this environment and nowhere
+        # else: a PATH search would let a 'yamllint' in the checkout under
+        # test win on Windows, where the current directory is searched.
+        YAMLLINT_ENV_DIR: ${{ runner.temp }}/info-yaml-validate/lint
       run: |
         # Validate the consumer's checked-out repository (the workspace),
         # running the script from this action's own checkout so the
