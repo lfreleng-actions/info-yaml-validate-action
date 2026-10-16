@@ -16,6 +16,8 @@ import yaml
 import info_yaml_validate as iyv
 from info_yaml import report
 
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
 # A document that satisfies the bundled schema. Individual tests copy this
 # and mutate one field, so a failure names the field it broke.
 VALID_INFO: dict[str, Any] = {
@@ -147,6 +149,65 @@ def test_bundled_schema_is_not_strictly_draft4_valid(schema: Any) -> None:
     """
     with pytest.raises(jsonschema.SchemaError):
         jsonschema.Draft4Validator.check_schema(schema)
+
+
+@pytest.mark.xfail(strict=True, reason="schema still carries Draft 3 defects")
+def test_bundled_schema_is_valid_draft_2020_12(schema: Any) -> None:
+    jsonschema.Draft202012Validator.check_schema(schema)
+
+
+@pytest.mark.xfail(strict=True, reason="schema still carries Draft 3 defects")
+@pytest.mark.parametrize("key", ["type", "url"])
+def test_issue_tracking_key_is_required(schema: Any, key: str) -> None:
+    tracking = {k: v for k, v in VALID_INFO["issue_tracking"].items() if k != key}
+    document = dict(VALID_INFO, issue_tracking=tracking)
+    findings = iyv.validate_schema(document, schema)
+    assert any(
+        finding.startswith("issue_tracking:") and f"'{key}'" in finding
+        for finding in findings
+    )
+
+
+@pytest.mark.xfail(strict=True, reason="no RFC 3986 checker is installed")
+def test_invalid_uri_is_reported(schema: Any) -> None:
+    tracking = dict(VALID_INFO["issue_tracking"], url="not a valid uri")
+    document = dict(VALID_INFO, issue_tracking=tracking)
+    findings = iyv.validate_schema(document, schema)
+    assert any(finding.startswith("issue_tracking.url:") for finding in findings)
+
+
+@pytest.mark.xfail(strict=True, reason="check_schema is not called up front")
+def test_invalid_caller_schema_fails_before_the_document_is_checked() -> None:
+    """A Draft 3 'required: false' must read as a schema defect."""
+    schema = {
+        "type": "object",
+        "properties": {"email": {"type": "string", "required": False}},
+    }
+    with pytest.raises(iyv.InfoYamlError, match=r"schema itself.*required"):
+        iyv.validate_schema({"email": "ada@example.org"}, schema)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "valid"),
+    [
+        ("valid", True),
+        ("wrong-repository", True),
+        ("invalid-schema", False),
+        pytest.param(
+            "missing-issue-tracking-keys",
+            False,
+            marks=pytest.mark.xfail(strict=True, reason="keys not enforced"),
+        ),
+        pytest.param(
+            "invalid-uri",
+            False,
+            marks=pytest.mark.xfail(strict=True, reason="uri not checked"),
+        ),
+    ],
+)
+def test_fixture_schema_verdict(schema: Any, fixture: str, valid: bool) -> None:
+    document = iyv.load_yaml(FIXTURES / fixture / "INFO.yaml", label="INFO.yaml")
+    assert (iyv.validate_schema(document, schema) == []) is valid
 
 
 def test_bundled_schema_still_validates_a_good_document(schema: Any) -> None:
