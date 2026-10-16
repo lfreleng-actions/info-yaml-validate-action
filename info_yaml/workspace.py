@@ -12,13 +12,17 @@ class InfoYamlError(RuntimeError):
     """Raised for unrecoverable, user-actionable configuration problems."""
 
 
-def contain(relative: str, workspace: Path, *, label: str) -> Path:
+def contain(
+    relative: str, workspace: Path, *, label: str, base: Path | None = None
+) -> Path:
     """Resolve a caller path and confirm it stays inside the workspace.
 
     A path escaping the checkout would let a workflow validate a file, or
-    against a schema, that nobody reviewed.
+    against a schema, that nobody reviewed. ``base`` resolves a relative
+    path against a directory other than the workspace, for paths a
+    consumer such as yamllint resolves against its working directory.
     """
-    candidate = (workspace / relative).resolve()
+    candidate = ((base or workspace) / relative).resolve()
     try:
         candidate.relative_to(workspace.resolve())
     except ValueError:

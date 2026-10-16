@@ -1,17 +1,28 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["jsonschema[format-nongpl]>=4.23", "PyYAML>=6", "referencing>=0.36"]
+# dependencies = [
+#     "jsonschema[format-nongpl]>=4.23",
+#     "PyYAML>=6",
+#     "referencing>=0.36",
+#     "yamllint>=1.35",
+# ]
 # ///
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 """Validate an ``INFO.yaml`` file against a schema and its declared repository.
 
-The script performs two independent checks:
+The script performs three checks, in this order:
 
-1. **Schema conformance** — the file is validated against a JSON Schema,
+1. **YAML lint** — yamllint runs over the file first, with the
+   workspace's ``.yamllint``, ``.yamllint.yaml`` or ``.yamllint.yml``,
+   or yamllint's ``default`` configuration when there is none. Running it
+   first means a file that does not parse reports a located syntax error
+   rather than a parser exception. Error-level findings fail the run;
+   warning-level findings are reported only.
+2. **Schema conformance** — the file is validated against a JSON Schema,
    by default the copy of ``info-schema.yaml`` bundled with this action.
-2. **Declared repository** — every entry under ``repositories`` must name
+3. **Declared repository** — every entry under ``repositories`` must name
    either the project itself or an ancestor of it, so a file cannot claim
    repositories it does not own.
 
@@ -37,9 +48,9 @@ workflows this action replaces: they fetched both the schema and the
 validator over ``wget`` from a mutable branch and executed the result.
 
 Inputs are read from ``INPUT_*`` environment variables (the GitHub Actions
-convention). The schema and repository checks live in
-``info_yaml.checks``, workspace containment in ``info_yaml.workspace`` and
-reporting in ``info_yaml.report``.
+convention). The yamllint stage lives in ``info_yaml.lint``, the schema
+and repository checks in ``info_yaml.checks``, workspace containment in
+``info_yaml.workspace`` and reporting in ``info_yaml.report``.
 """
 
 from __future__ import annotations
@@ -53,7 +64,9 @@ from typing import Any
 import yaml
 
 from info_yaml.checks import check_repositories, extract_repositories, validate_schema
+from info_yaml.lint import lint_yaml, resolve_lint_config
 from info_yaml.report import (
+    LintFinding,
     Result,
     append_to_env_file,
     escape_data,
@@ -100,10 +113,17 @@ def _as_bool(value: str, *, default: bool, name: str) -> bool:
     )
 
 
-def load_yaml(path: Path, *, label: str) -> Any:
-    """Read and parse a YAML document, with actionable failure messages."""
+def read_text(path: Path, *, label: str) -> str:
+    """Read a UTF-8 file, keeping its line endings, with actionable failures.
+
+    ``newline=''`` stops Python translating CRLF to LF on the way in.
+    yamllint's ``new-lines`` rule judges the endings as written, so a
+    translated read would hide a CRLF file from the default Unix rule and
+    fail a correctly formatted one under a ``type: dos`` configuration.
+    """
     try:
-        text = path.read_text(encoding="utf-8")
+        with path.open(encoding="utf-8", newline="") as handle:
+            return handle.read()
     except FileNotFoundError:
         raise InfoYamlError(f"{label} not found at '{path}'") from None
     except OSError as exc:
@@ -111,10 +131,18 @@ def load_yaml(path: Path, *, label: str) -> Any:
     except UnicodeDecodeError:
         raise InfoYamlError(f"{label} at '{path}' is not valid UTF-8") from None
 
+
+def parse_yaml(text: str, path: Path, *, label: str) -> Any:
+    """Parse a YAML document read from ``path``."""
     try:
         return yaml.load(text, Loader=LOADER)  # nosec B506 - SafeLoader subclass
     except yaml.YAMLError as exc:
         raise InfoYamlError(f"{label} at '{path}' is not valid YAML: {exc}") from None
+
+
+def load_yaml(path: Path, *, label: str) -> Any:
+    """Read and parse a YAML document, with actionable failure messages."""
+    return parse_yaml(read_text(path, label=label), path, label=label)
 
 
 def resolve_project(explicit: str, workspace: Path) -> str:
@@ -196,6 +224,15 @@ def emit(result: Result, info_path: str) -> int:
     write_outputs(result)
 
     location = escape_property(info_path)
+    if result.lint_checked:
+        print(f"  YAML lint config: {sanitise(result.lint_config)}")
+    for item in result.lint_findings:
+        print(f"  YAML lint: {sanitise(item.describe())}")
+        command = "error" if item.level == "error" else "warning"
+        message = escape_data(f"yamllint: {item.describe()}")
+        print(
+            f"::{command} file={location},line={item.line},col={item.column}::{message}"
+        )
     for finding in result.schema_errors:
         print(f"  Schema: {sanitise(finding)}")
         message = escape_data(f"INFO.yaml schema violation at {finding}")
@@ -205,19 +242,31 @@ def emit(result: Result, info_path: str) -> int:
         print(f"::error file={location}::{escape_data(finding)}")
 
     if result.valid:
-        if not result.repository_checked:
-            print("Result: valid ✅ (repository check skipped by request)")
+        skipped = [
+            name
+            for name, checked in (
+                ("YAML lint", result.lint_checked),
+                ("repository check", result.repository_checked),
+            )
+            if not checked
+        ]
+        if skipped:
+            print(f"Result: valid ✅ ({' and '.join(skipped)} skipped by request)")
         else:
             print("Result: valid ✅")
         return 0
 
-    total = len(result.schema_errors) + len(result.repository_errors)
+    total = (
+        len(result.lint_errors)
+        + len(result.schema_errors)
+        + len(result.repository_errors)
+    )
     print(f"Result: INVALID ❌ ({total} finding(s))")
     return 1
 
 
 def main() -> int:
-    """Entry point: read inputs, run both checks, emit results."""
+    """Entry point: read inputs, run the checks, emit results."""
     workspace = Path(os.environ.get("GITHUB_WORKSPACE") or Path.cwd())
     raw_path = os.environ.get("INPUT_PATH", "")
     raw_project = os.environ.get("INPUT_PROJECT", "")
@@ -229,14 +278,35 @@ def main() -> int:
             default=True,
             name="require-repository-match",
         )
+        lint_enabled = _as_bool(
+            os.environ.get("INPUT_LINT_YAML", ""), default=True, name="lint-yaml"
+        )
         info_path = resolve_info_path(raw_path, workspace)
         schema_path = resolve_schema_path(raw_schema, workspace)
-        document = load_yaml(info_path, label="INFO.yaml")
-        schema = load_yaml(schema_path, label="Schema")
+        # Report paths relative to the workspace: an absolute runner path in
+        # an annotation stops GitHub associating it with a file in the diff.
+        display_path = str(info_path.relative_to(workspace.resolve()))
+        text = read_text(info_path, label="INFO.yaml")
+        lint_findings: list[LintFinding] = []
+        lint_config = "default"
+        if lint_enabled:
+            config, lint_config = resolve_lint_config(workspace)
+            lint_findings = lint_yaml(text, config, display_path)
+        # yamllint reports a parse failure as a finding without a rule, and
+        # it already locates the problem; parsing again would only replace
+        # that finding with a parser exception. Decide this before loading
+        # the schema or resolving the project: either can fail for its own
+        # reasons, and a failure there would discard the lint finding and
+        # publish a zero lint count for a file that does not parse.
+        parsed = not any(item.rule is None for item in lint_findings)
+        schema = load_yaml(schema_path, label="Schema") if parsed else None
         project = (
-            resolve_project(raw_project, workspace) if require_repository_match else ""
+            resolve_project(raw_project, workspace)
+            if parsed and require_repository_match
+            else ""
         )
-        schema_errors = validate_schema(document, schema)
+        document = parse_yaml(text, info_path, label="INFO.yaml") if parsed else None
+        schema_errors = validate_schema(document, schema) if parsed else []
     except InfoYamlError as exc:
         print(f"::error::{escape_data(str(exc))}")
         # Publish outputs even here, so a caller running the step under
@@ -244,8 +314,8 @@ def main() -> int:
         write_failure_outputs()
         return 1
 
-    entries, structural_errors = extract_repositories(document)
-    if not require_repository_match:
+    entries, structural_errors = extract_repositories(document) if parsed else ([], [])
+    if not require_repository_match or not parsed:
         repository_errors: list[str] = []
     elif structural_errors:
         # Extraction already explained precisely what is wrong. Running
@@ -264,10 +334,11 @@ def main() -> int:
         schema_errors=schema_errors,
         repository_errors=repository_errors,
         repository_checked=require_repository_match,
+        lint_findings=lint_findings,
+        lint_checked=lint_enabled,
+        lint_config=lint_config,
+        parsed=parsed,
     )
-    # Report paths relative to the workspace: an absolute runner path in an
-    # annotation stops GitHub associating it with a file in the diff.
-    display_path = str(info_path.relative_to(workspace.resolve()))
     return emit(result, display_path)
 
 
