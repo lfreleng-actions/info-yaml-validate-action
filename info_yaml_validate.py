@@ -37,25 +37,22 @@ workflows this action replaces: they fetched both the schema and the
 validator over ``wget`` from a mutable branch and executed the result.
 
 Inputs are read from ``INPUT_*`` environment variables (the GitHub Actions
-convention). Reporting lives in ``info_yaml.report``.
+convention). The schema and repository checks live in
+``info_yaml.checks``, workspace containment in ``info_yaml.workspace`` and
+reporting in ``info_yaml.report``.
 """
 
 from __future__ import annotations
 
 import configparser
 import os
-import re
 import sys
-from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-import jsonschema
 import yaml
-from jsonschema.exceptions import SchemaError, UnknownType, ValidationError
-from referencing import Registry
-from referencing.exceptions import NoSuchResource, Unresolvable
 
+from info_yaml.checks import check_repositories, extract_repositories, validate_schema
 from info_yaml.report import (
     Result,
     append_to_env_file,
@@ -66,6 +63,7 @@ from info_yaml.report import (
     write_failure_outputs,
     write_outputs,
 )
+from info_yaml.workspace import InfoYamlError, contain
 
 DEFAULT_INFO_PATH = "INFO.yaml"
 GITREVIEW_PATH = ".gitreview"
@@ -80,10 +78,6 @@ LOADER = yaml.CSafeLoader if yaml.__with_libyaml__ else yaml.SafeLoader
 
 TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
 FALSE_VALUES = frozenset({"false", "0", "no", "off"})
-
-
-class InfoYamlError(RuntimeError):
-    """Raised for unrecoverable, user-actionable configuration problems."""
 
 
 def _as_bool(value: str, *, default: bool, name: str) -> bool:
@@ -139,7 +133,7 @@ def resolve_project(explicit: str, workspace: Path) -> str:
     # the workflow, but the repository under test owns the file, and a
     # symlink at .gitreview would otherwise let it steer the read
     # anywhere on the runner: both is_file() and read_text() follow links.
-    gitreview = _contain(GITREVIEW_PATH, workspace, label=".gitreview")
+    gitreview = contain(GITREVIEW_PATH, workspace, label=".gitreview")
     if not gitreview.is_file():
         raise InfoYamlError(
             "the 'project' input is empty and no .gitreview file was found. "
@@ -169,174 +163,16 @@ def resolve_project(explicit: str, workspace: Path) -> str:
     return project[: -len(".git")] if project.endswith(".git") else project
 
 
-def format_error_path(error: ValidationError) -> str:
-    """Render a validation error's location as a readable path.
-
-    ``absolute_path`` mixes mapping keys and sequence indices, so indices
-    render in brackets and keys join with dots. An error at the document
-    root has an empty path and reports as ``(document root)``.
-    """
-    parts: list[str] = []
-    for element in error.absolute_path:
-        if isinstance(element, int):
-            parts.append(f"[{element}]")
-        elif parts:
-            parts.append(f".{element}")
-        else:
-            parts.append(str(element))
-    return "".join(parts) or "(document root)"
-
-
-def _refusing_registry(attempted: list[str]) -> Registry[Any]:
-    """Build a registry that refuses to fetch anything, recording attempts.
-
-    jsonschema 4.26 retrieves unresolved references over the network by
-    default, emitting only a DeprecationWarning. A caller-supplied schema
-    could therefore reach an arbitrary URL, or a ``file:`` path outside
-    the workspace, defeating the containment applied to ``schema-path``
-    and the claim that validation performs no network I/O.
-
-    The retriever raises the protocol's own ``NoSuchResource`` rather than
-    a local exception, because ``referencing`` wraps whatever it receives
-    and the wrapping loses a custom type. Recording the URI instead gives
-    the caller a precise message without depending on an exception chain.
-
-    Internal pointers resolve within the document and never reach here.
-    """
-
-    def retrieve(uri: str) -> Any:
-        attempted.append(uri)
-        raise NoSuchResource(ref=uri)
-
-    return Registry(retrieve=retrieve)
-
-
-def validate_schema(document: Any, schema: Any) -> list[str]:
-    """Collect every schema violation, not merely the first.
-
-    Reporting all findings at once matters for a gating check: a caller
-    fixing one error per run turns a five-minute correction into five
-    review cycles.
-
-    The schema is checked against the Draft 2020-12 metaschema first, so
-    a defective schema fails with an error naming the defect rather than
-    as a misleading document finding, or not at all: a keyword the draft
-    does not recognise in that position is otherwise ignored.
-    """
-    validator_class = jsonschema.Draft202012Validator
-    try:
-        validator_class.check_schema(schema)
-    except SchemaError as exc:
-        raise InfoYamlError(
-            f"the schema itself is not valid at {exc.json_path}: {exc.message}"
-        ) from None
-
-    attempted: list[str] = []
-    validator = validator_class(
-        schema,
-        format_checker=validator_class.FORMAT_CHECKER,
-        registry=_refusing_registry(attempted),
-    )
-    try:
-        errors = sorted(validator.iter_errors(document), key=str)
-    except Unresolvable as exc:
-        if attempted:
-            raise InfoYamlError(
-                f"the schema references an external resource "
-                f"('{attempted[0]}'); only self-contained schemas are "
-                "supported"
-            ) from None
-        raise InfoYamlError(
-            f"the schema contains a reference that cannot be resolved: {exc}"
-        ) from None
-    except (UnknownType, AttributeError, TypeError, re.error) as exc:
-        # A subschema under a keyword the metaschema does not know passes
-        # check_schema unread, so a $ref can still lead validation into a
-        # bad 'type' or an unparsable 'pattern'. Caught for the reason the
-        # metaschema check exists: escaping would skip the failure outputs.
-        raise InfoYamlError(f"the schema could not be applied: {exc}") from None
-
-    return [f"{format_error_path(error)}: {error.message}" for error in errors]
-
-
-def extract_repositories(document: Any) -> tuple[list[Any], list[str]]:
-    """Return the raw ``repositories`` entries and any structural findings.
-
-    Entries come back untouched, including any that are not strings. The
-    bundled schema declares no ``repositories`` subschema at all, so the
-    schema check reports nothing about their type; discarding a malformed
-    entry here would leave nobody reporting it, and a document such as
-    ``repositories: ['example', 42]`` would pass both checks.
-    """
-    if not isinstance(document, dict):
-        return [], ["INFO.yaml does not contain a mapping at the top level"]
-    if "repositories" not in document:
-        return [], ["INFO.yaml declares no 'repositories' key"]
-    raw = document["repositories"]
-    if not isinstance(raw, list):
-        return [], [
-            f"'repositories' must be a list, found {type(raw).__name__}"  # noqa: COM812
-        ]
-    return list(raw), []  # pyright: ignore[reportUnknownArgumentType]
-
-
-def check_repositories(entries: Sequence[Any], project: str) -> list[str]:
-    """Verify every declared repository is the project or an ancestor of it.
-
-    An ancestor is permitted so that a subproject repository such as
-    ``integration/distribution`` may carry an ``INFO.yaml`` naming the
-    parent project ``integration``.
-    """
-    if not entries:
-        return [
-            "no repositories are declared; INFO.yaml must list the "
-            f"repository it describes (expected '{project}')"
-        ]
-
-    findings: list[str] = []
-    for entry in entries:
-        if not isinstance(entry, str):
-            findings.append(
-                f"declared repository entry {entry!r} is not a string; "
-                "every entry must name a repository"
-            )
-            continue
-        if entry == project or project.startswith(f"{entry}/"):
-            continue
-        findings.append(
-            f"declared repository '{entry}' is neither the project "
-            f"'{project}' nor an ancestor of it"
-        )
-    return findings
-
-
-def _contain(relative: str, workspace: Path, *, label: str) -> Path:
-    """Resolve a caller path and confirm it stays inside the workspace.
-
-    A path escaping the checkout would let a workflow validate a file, or
-    against a schema, that nobody reviewed.
-    """
-    candidate = (workspace / relative).resolve()
-    try:
-        candidate.relative_to(workspace.resolve())
-    except ValueError:
-        raise InfoYamlError(
-            f"{label} '{relative}' resolves outside the workspace; supply a "
-            "path inside the repository"
-        ) from None
-    return candidate
-
-
 def resolve_schema_path(explicit: str, workspace: Path) -> Path:
     """Pick the schema to validate against, containing any caller path."""
     if not explicit.strip():
         return BUNDLED_SCHEMA
-    return _contain(explicit.strip(), workspace, label="schema-path")
+    return contain(explicit.strip(), workspace, label="schema-path")
 
 
 def resolve_info_path(explicit: str, workspace: Path) -> Path:
     """Resolve the INFO.yaml location, containing it within the workspace."""
-    return _contain(explicit.strip() or DEFAULT_INFO_PATH, workspace, label="path")
+    return contain(explicit.strip() or DEFAULT_INFO_PATH, workspace, label="path")
 
 
 def emit(result: Result, info_path: str) -> int:
