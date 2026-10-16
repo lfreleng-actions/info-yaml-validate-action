@@ -8,7 +8,7 @@ description = "Validate INFO.yaml against a schema and its declared repository"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
-dependencies = ["jsonschema>=4.23", "PyYAML>=6", "referencing>=0.36"]
+dependencies = ["jsonschema[format-nongpl]>=4.23", "PyYAML>=6", "referencing>=0.36"]
 
 [dependency-groups]
 dev = ["pytest>=8"]

@@ -16,6 +16,8 @@ import yaml
 import info_yaml_validate as iyv
 from info_yaml import report
 
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
 # A document that satisfies the bundled schema. Individual tests copy this
 # and mutate one field, so a failure names the field it broke.
 VALID_INFO: dict[str, Any] = {
@@ -121,32 +123,98 @@ def test_unknown_key_in_user_object_is_reported(schema: Any) -> None:
 
 def test_unknown_type_in_schema_is_reported_against_the_schema() -> None:
     """A broken caller schema must not read as a document finding."""
-    with pytest.raises(iyv.InfoYamlError, match="unknown type"):
+    with pytest.raises(iyv.InfoYamlError, match=r"schema itself.*\$\.type"):
         iyv.validate_schema(VALID_INFO, {"type": "not-a-real-type"})
 
 
 def test_unparsable_pattern_is_reported_against_the_schema() -> None:
-    """'pattern' reaches re.search directly; re.error is not a TypeError."""
+    """The metaschema checks 'pattern' as a regex before it reaches re.search."""
     schema = {"type": "object", "properties": {"project": {"pattern": "["}}}
-    with pytest.raises(iyv.InfoYamlError, match="could not be applied"):
+    with pytest.raises(iyv.InfoYamlError, match="schema itself is not valid"):
         iyv.validate_schema({"project": "example"}, schema)
 
 
 def test_unparsable_pattern_properties_is_reported() -> None:
     schema = {"type": "object", "patternProperties": {"(": {"type": "string"}}}
-    with pytest.raises(iyv.InfoYamlError, match="could not be applied"):
+    with pytest.raises(iyv.InfoYamlError, match="schema itself is not valid"):
         iyv.validate_schema({"project": "example"}, schema)
 
 
-def test_bundled_schema_is_not_strictly_draft4_valid(schema: Any) -> None:
-    """Guards the reason validate_schema does not call check_schema.
+# The metaschema only describes the keywords it knows, so a subschema
+# stored under an unknown keyword passes check_schema unread and fails
+# only once a $ref leads document validation into it. Each case below
+# would otherwise escape main()'s InfoYamlError handler and abort the
+# run before the failure outputs are written.
+@pytest.mark.parametrize(
+    "subschema",
+    [
+        pytest.param({"type": "not-a-real-type"}, id="unknown-type"),
+        pytest.param(
+            {"type": "object", "properties": {"project": {"pattern": "["}}},
+            id="unparsable-pattern",
+        ),
+        pytest.param(
+            {"type": "object", "patternProperties": {"(": {}}},
+            id="unparsable-pattern-properties",
+        ),
+    ],
+)
+def test_defect_behind_internal_ref_is_reported_against_the_schema(
+    subschema: dict[str, Any],
+) -> None:
+    schema = {"$ref": "#/custom", "custom": subschema}
+    # The defect is invisible to the metaschema check...
+    jsonschema.Draft202012Validator.check_schema(schema)
+    # ...and must still surface as a schema error, not an uncaught exception.
+    with pytest.raises(iyv.InfoYamlError, match="schema could not be applied"):
+        iyv.validate_schema({"project": "example"}, schema)
 
-    The canonical schema carries Draft 3 spellings. If upstream ever
-    corrects them this test fails, at which point check_schema can be
-    reinstated and this test deleted.
-    """
-    with pytest.raises(jsonschema.SchemaError):
-        jsonschema.Draft4Validator.check_schema(schema)
+
+def test_bundled_schema_is_valid_draft_2020_12(schema: Any) -> None:
+    jsonschema.Draft202012Validator.check_schema(schema)
+
+
+@pytest.mark.parametrize("key", ["type", "url"])
+def test_issue_tracking_key_is_required(schema: Any, key: str) -> None:
+    tracking = {k: v for k, v in VALID_INFO["issue_tracking"].items() if k != key}
+    document = dict(VALID_INFO, issue_tracking=tracking)
+    findings = iyv.validate_schema(document, schema)
+    assert any(
+        finding.startswith("issue_tracking:") and f"'{key}'" in finding
+        for finding in findings
+    )
+
+
+def test_invalid_uri_is_reported(schema: Any) -> None:
+    tracking = dict(VALID_INFO["issue_tracking"], url="not a valid uri")
+    document = dict(VALID_INFO, issue_tracking=tracking)
+    findings = iyv.validate_schema(document, schema)
+    assert any(finding.startswith("issue_tracking.url:") for finding in findings)
+
+
+def test_invalid_caller_schema_fails_before_the_document_is_checked() -> None:
+    """A Draft 3 'required: false' must read as a schema defect."""
+    schema = {
+        "type": "object",
+        "properties": {"email": {"type": "string", "required": False}},
+    }
+    with pytest.raises(iyv.InfoYamlError, match=r"schema itself.*required"):
+        iyv.validate_schema({"email": "ada@example.org"}, schema)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "valid"),
+    [
+        ("valid", True),
+        ("wrong-repository", True),
+        ("invalid-schema", False),
+        ("missing-issue-tracking-keys", False),
+        ("invalid-uri", False),
+    ],
+)
+def test_fixture_schema_verdict(schema: Any, fixture: str, valid: bool) -> None:
+    document = iyv.load_yaml(FIXTURES / fixture / "INFO.yaml", label="INFO.yaml")
+    assert (iyv.validate_schema(document, schema) == []) is valid
 
 
 def test_bundled_schema_still_validates_a_good_document(schema: Any) -> None:
