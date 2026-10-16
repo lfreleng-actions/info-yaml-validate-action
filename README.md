@@ -15,8 +15,8 @@ root. This action gates changes to that file.
 ## What it checks
 
 1. **Schema conformance.** The action checks the document against a JSON
-   Schema, defaulting to the copy of `info-schema.yaml` it bundles. It
-   reports every violation in one pass.
+   Schema (Draft 2020-12), defaulting to the copy of `info-schema.yaml` it
+   bundles. It reports every violation in one pass.
 2. **Declared repository.** Every entry under `repositories` must name
    either the project itself or an ancestor of it. Entries that are not
    strings draw a finding of their own: the bundled schema declares no
@@ -177,34 +177,55 @@ path.
 
 ## About the bundled schema
 
-`schema/info-schema.yaml` comes verbatim from
+`schema/info-schema.yaml` derives from
 [`lfit/releng-global-jjb`](https://github.com/lfit/releng-global-jjb/blob/master/schema/info-schema.yaml).
 It keeps its original **EPL-1.0** licence, which `REUSE.toml` records; the
 rest of this repository uses Apache-2.0.
 
-The action validates with **Draft 4** and a format checker, matching the
-legacy `yaml-verify-schema.py`, so files the old tooling accepted still
-pass.
-
-The schema does not itself conform to Draft 4, so the action skips
-`check_schema`. Three defects carry over from Draft 3:
+The upstream copy was not a valid JSON Schema of any draft. This copy
+corrects it to valid **Draft 2020-12**:
 
 <!-- markdownlint-disable MD013 -->
 
-| Location                                    | Problem                                                                                                                                                 |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `project_lead.properties.email.required`    | `required: false` spells a Draft 3 construct; Draft 4 expects an array. Draft 4 ignores it.                                                             |
-| `project_lead.properties.timezone.required` | As above. Draft 4 ignores it.                                                                                                                           |
-| `issue_tracking.properties.required`        | `required` sits *inside* `properties`, so it declares a property named `required` rather than constraining anything. Nothing enforces `type` and `url`. |
+| Location                                    | Upstream defect                                                                     | Correction                                       |
+| ------------------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------ |
+| `$schema`                                   | The unversioned `http://json-schema.org/schema#`                                    | `https://json-schema.org/draft/2020-12/schema`   |
+| `project_lead.properties.email.required`    | `required: false`, a Draft 3 spelling that later drafts ignore                      | Removed; properties are optional by default      |
+| `project_lead.properties.timezone.required` | As above                                                                            | Removed                                          |
+| `issue_tracking.properties.required`        | Declared a *property named `required`*, so nothing enforced `type` and `url`        | Moved to the `issue_tracking` object             |
 
 <!-- markdownlint-enable MD013 -->
 
-A unit test asserts that the schema stays non-conformant. Should upstream
-correct it, that test fails, and the action can then adopt `check_schema`.
+The `$id` names this repository, which now owns the copy.
 
-Tightening the schema falls outside this change: doing so would start
-failing files that have passed for years, and belongs in a separate change
-carrying its own consultation.
+### How the action validates
+
+- The action checks the schema against the Draft 2020-12 metaschema
+  **before** it validates the document. A defective schema, bundled or
+  supplied through `schema-path`, fails with an error naming the
+  offending location rather than a misleading document finding.
+- Validation uses Draft 2020-12 with format checking enabled.
+  `format: uri` uses `rfc3986-validator`, installed through the
+  `jsonschema[format-nongpl]` extra; the plain `format` extra would pull
+  in the GPL-licensed `rfc3987`. `format: email` checks for an `@` and
+  nothing more.
+
+These are stricter than the legacy `yaml-verify-schema.py`:
+`issue_tracking.type` and `issue_tracking.url` are now required, and URI
+values must parse as absolute RFC 3986 URIs. A file the old tooling
+accepted can fail here on either count.
+
+### YAML 1.1 parsing
+
+The action parses `INFO.yaml` with PyYAML, which implements YAML 1.1, as
+the legacy validator did. Unquoted scalars can load as types other than
+strings and then fail the schema's `type: string`:
+
+- `project_creation_date: 2017-02-10` loads as a date. Quote it:
+  `"2017-02-10"`.
+- `yes`, `no`, `on` and `off` load as booleans.
+
+Quote such values.
 
 ## Development
 

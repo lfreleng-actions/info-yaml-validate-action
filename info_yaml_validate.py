@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["jsonschema>=4.23", "PyYAML>=6", "referencing>=0.36"]
+# dependencies = ["jsonschema[format-nongpl]>=4.23", "PyYAML>=6", "referencing>=0.36"]
 # ///
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
@@ -19,11 +19,16 @@ The ancestor rule exists for subproject repositories: a Gerrit project
 ``integration/distribution`` may carry an ``INFO.yaml`` whose
 ``repositories`` list names the parent ``integration``.
 
-Schema validation deliberately uses Draft 4 with a format checker, matching
-``yaml-verify-schema.py`` in ``lfit/releng-global-jjb`` so that files
-accepted by the legacy tooling remain accepted here. Later drafts reject
-constructs the bundled schema relies on, and would fail files that have
-been valid for years.
+Schema validation uses JSON Schema Draft 2020-12 with format checking
+enabled. The schema itself is checked against the Draft 2020-12 metaschema
+before any document is validated, so a defective schema, bundled or
+caller-supplied, fails up front with a schema error. ``format: uri`` is
+enforced through ``rfc3986-validator``, which the ``format-nongpl`` extra
+of ``jsonschema`` installs.
+
+Documents are parsed with PyYAML, which implements YAML 1.1: an unquoted
+``2017-02-10`` loads as a date and ``yes``/``no`` load as booleans, so such
+values fail a ``type: string`` constraint. Quote them.
 
 The script makes **no network calls**. The schema is read from disk, either
 from this action's own checkout or from a path the caller supplies. Nothing
@@ -213,22 +218,23 @@ def validate_schema(document: Any, schema: Any) -> list[str]:
     fixing one error per run turns a five-minute correction into five
     review cycles.
 
-    ``Draft4Validator.check_schema`` is deliberately *not* called first.
-    The canonical ``info-schema.yaml`` is not itself valid Draft 4 — it
-    carries Draft 3 spellings such as ``required: false`` inside a property
-    subschema — so checking would reject the bundled schema and every
-    legacy-compatible copy of it. Draft 4 ignores those keywords in
-    practice, which is why the files have validated for years. See the
-    README for the specific defects.
-
-    A genuinely broken schema therefore surfaces as a runtime failure part
-    way through validation rather than up front, so those are caught here
-    and reported against the schema rather than the document.
+    The schema is checked against the Draft 2020-12 metaschema first, so
+    a defective schema fails with an error naming the defect rather than
+    as a misleading document finding, or not at all: a keyword the draft
+    does not recognise in that position is otherwise ignored.
     """
+    validator_class = jsonschema.Draft202012Validator
+    try:
+        validator_class.check_schema(schema)
+    except SchemaError as exc:
+        raise InfoYamlError(
+            f"the schema itself is not valid at {exc.json_path}: {exc.message}"
+        ) from None
+
     attempted: list[str] = []
-    validator = jsonschema.Draft4Validator(
+    validator = validator_class(
         schema,
-        format_checker=jsonschema.FormatChecker(),
+        format_checker=validator_class.FORMAT_CHECKER,
         registry=_refusing_registry(attempted),
     )
     try:
@@ -243,16 +249,11 @@ def validate_schema(document: Any, schema: Any) -> list[str]:
         raise InfoYamlError(
             f"the schema contains a reference that cannot be resolved: {exc}"
         ) from None
-    except SchemaError as exc:
-        raise InfoYamlError(f"the schema itself is not valid: {exc.message}") from None
-    except UnknownType as exc:
-        raise InfoYamlError(f"the schema names an unknown type: {exc}") from None
-    except (AttributeError, TypeError, re.error) as exc:
-        # A malformed subschema fails inside the keyword validator rather
-        # than cleanly: a bad 'type' raises TypeError/AttributeError, and
-        # 'pattern'/'patternProperties' hand their value straight to
-        # re.search, so an unparsable regex surfaces as re.error. Left
-        # uncaught, any of them would abort before the failure outputs.
+    except (UnknownType, AttributeError, TypeError, re.error) as exc:
+        # A subschema under a keyword the metaschema does not know passes
+        # check_schema unread, so a $ref can still lead validation into a
+        # bad 'type' or an unparsable 'pattern'. Caught for the reason the
+        # metaschema check exists: escaping would skip the failure outputs.
         raise InfoYamlError(f"the schema could not be applied: {exc}") from None
 
     return [f"{format_error_path(error)}: {error.message}" for error in errors]
