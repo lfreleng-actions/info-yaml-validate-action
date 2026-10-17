@@ -5,8 +5,9 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # 📋 INFO.yaml Validation Action
 
-Checks an `INFO.yaml` file against a JSON schema and confirms that the
-repositories it declares match the project it describes.
+Lints an `INFO.yaml` file with yamllint, checks it against a JSON schema
+and confirms that the repositories it declares match the project it
+describes.
 
 Linux Foundation projects keep governance metadata — leads, committers,
 issue tracking, lifecycle state — in an `INFO.yaml` file at the repository
@@ -14,10 +15,19 @@ root. This action gates changes to that file.
 
 ## What it checks
 
-1. **Schema conformance.** The action checks the document against a JSON
+The checks run in this order:
+
+1. **YAML lint.** [yamllint](https://yamllint.readthedocs.io/) runs over
+   the file, as the legacy workflows did before schema validation. A
+   schema-valid file can still carry trailing whitespace, odd indentation
+   or a missing document start that a project's own linting would reject.
+   Error-level findings fail the step; warning-level findings appear as
+   warnings and do not. Running first means a file that fails to parse
+   reports a located syntax error, and the later checks do not run.
+2. **Schema conformance.** The action checks the document against a JSON
    Schema (Draft 2020-12), defaulting to the copy of `info-schema.yaml` it
    bundles. It reports every violation in one pass.
-2. **Declared repository.** Every entry under `repositories` must name
+3. **Declared repository.** Every entry under `repositories` must name
    either the project itself or an ancestor of it. Entries that are not
    strings draw a finding of their own: the bundled schema declares no
    `repositories` subschema, so nothing else would report them.
@@ -56,12 +66,20 @@ Naming the project explicitly, for a repository carrying no `.gitreview`:
           project: "integration/distribution"
 ```
 
-Schema conformance alone:
+Schema conformance and YAML lint, without the repository check:
 
 ```yaml
       - uses: lfreleng-actions/info-yaml-validate-action@<SHA>
         with:
           require-repository-match: "false"
+```
+
+Skipping the YAML lint stage:
+
+```yaml
+      - uses: lfreleng-actions/info-yaml-validate-action@<SHA>
+        with:
+          lint-yaml: "false"
 ```
 
 ## Inputs
@@ -74,6 +92,7 @@ Schema conformance alone:
 | project                  | False    | Project the file must describe; empty reads `.gitreview`                     |             |
 | schema-path              | False    | Workspace-relative path to another schema; empty selects the bundled one     |             |
 | require-repository-match | False    | Run the declared-repository check                                            | `true`      |
+| lint-yaml                | False    | Run yamllint over the file before schema validation                          | `true`      |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -87,15 +106,16 @@ Schema conformance alone:
 | project            | Project driving the repository check; empty when skipped    |
 | repositories       | Newline-separated list of repositories the file declares    |
 | schema-error-count | Count of schema violations                                  |
+| lint-error-count   | Count of error-level yamllint findings; `0` when skipped    |
 
 <!-- markdownlint-enable MD013 -->
 
 `valid` reports on the checks that ran. With `require-repository-match`
-set to `false`, schema conformance is the sole check, so `true` says
-nothing about the repositories the file declares; the job summary records
-the skip.
+set to `false`, `true` says nothing about the repositories the file
+declares; with `lint-yaml` set to `false`, it says nothing about the
+file's formatting. The job summary records each skip.
 
-The action publishes all four outputs for input and validation failures
+The action publishes all five outputs for input and validation failures
 it handles itself, so a caller running the step under `continue-on-error`
 reads `valid=false` rather than an empty string. A failure in the
 surrounding composite — `setup-uv` failing, or `uv run` unable to install
@@ -104,6 +124,23 @@ the outputs unset. Callers branching on `valid` should treat an empty
 value as a failed step rather than a verdict.
 
 ## Behaviour
+
+### YAML lint configuration
+
+The lint stage uses the first of `.yamllint`, `.yamllint.yaml` and
+`.yamllint.yml` it finds at the workspace root, the names yamllint itself
+discovers. Without one it applies yamllint's `default` configuration. A
+repository that wants relaxed rules expresses that in its own
+configuration, for example:
+
+```yaml
+---
+extends: relaxed
+```
+
+The configuration's `ignore` patterns apply too, so a configuration that
+ignores the `INFO.yaml` path leaves the lint stage with nothing to report.
+The job summary names the configuration in use.
 
 ### Resolving the project name
 
@@ -131,13 +168,14 @@ into five review cycles.
 
 ## Security
 
-- **Validation performs no network I/O.** The action reads the schema
-  from disk, either from its own checkout or from a path inside the
-  workspace, and refuses any `$ref` pointing outside the document. This
-  covers the validation step alone: the composite still runs `setup-uv`,
-  which may download the `uv` binary, and `uv run --locked`, which
-  installs the pinned dependencies when the runner has no cache. Both
-  fetch pinned, immutable content; the validator fetches nothing.
+- **Validation performs no network I/O.** yamllint runs offline through
+  its Python API. The action reads the schema from disk, either from its
+  own checkout or from a path inside the workspace, and refuses any
+  `$ref` pointing outside the document. This covers the validation step
+  alone: the composite still runs `setup-uv`, which may download the
+  `uv` binary, and `uv run --locked`, which installs the pinned
+  dependencies when the runner has no cache. Both fetch pinned,
+  immutable content; the validator fetches nothing.
 - **External schema references get refused.** jsonschema 4.26 retrieves
   unresolved `$ref` targets over the network by default, raising a
   `DeprecationWarning` and nothing more. A caller-supplied schema could
@@ -151,6 +189,11 @@ into five review cycles.
   no workflow input names it, but the repository under test owns it, and
   a symlink there would otherwise steer the read anywhere on the runner.
   Links pointing *within* the workspace keep working.
+- The yamllint configuration gets the same containment, and so does every
+  file it names: yamllint opens `extends` and `ignore-from-file` paths
+  as written, so a configuration could otherwise read any file on the
+  runner. yamllint's bundled configurations, such as `default` and
+  `relaxed`, remain available to `extends`.
 - Step outputs use a randomised heredoc delimiter for every value drawn
   from the repository, `project` included: `.gitreview` uses INI syntax,
   which permits a multi-line value, and a newline in a single-line record
