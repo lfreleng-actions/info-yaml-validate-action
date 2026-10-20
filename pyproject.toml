@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
 [project]
 name = "info-yaml-validate-action"
 version = "0.0.0"
@@ -10,6 +14,9 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 dependencies = ["jsonschema[format-nongpl]>=4.23", "PyYAML>=6", "referencing>=0.36"]
 
+[project.scripts]
+info-yaml-validate = "info_yaml.cli:main"
+
 [dependency-groups]
 # yamllint is GPL-3.0 and is not a runtime dependency: the action runs the
 # packaged command as a separate process and imports nothing from it. The
@@ -18,6 +25,15 @@ dependencies = ["jsonschema[format-nongpl]>=4.23", "PyYAML>=6", "referencing>=0.
 # the tests need the same command on PATH, which 'uv run' provides.
 lint = ["yamllint>=1.35"]
 dev = ["pytest>=8", { include-group = "lint" }]
+
+[tool.hatch.build.targets.wheel]
+packages = ["info_yaml"]
+
+# The schema lives at the repository root, where the action reads it; a
+# wheel carries a copy inside the package, where info_yaml.validate
+# looks first.
+[tool.hatch.build.targets.wheel.force-include]
+"schema/info-schema.yaml" = "info_yaml/info-schema.yaml"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

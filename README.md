@@ -124,6 +124,105 @@ the locked dependencies — happens before the validator starts, and leaves
 the outputs unset. Callers branching on `valid` should treat an empty
 value as a failed step rather than a verdict.
 
+## Command line
+
+The same checks run as the `info-yaml-validate` command, from the same
+code as the action. Install it from a checkout of this repository:
+
+```bash
+uv tool install .
+```
+
+```text
+info-yaml-validate [PATH ...]
+    [--project NAME]            default: read from .gitreview
+    [--schema PATH]             default: bundled schema
+    [--no-repository-match]
+    [--no-lint-yaml]
+```
+
+- With no paths, it validates `INFO.yaml` in the current directory.
+- The current directory is the working tree: paths, `.gitreview`, the
+  yamllint configuration and `--schema` resolve against it, and each
+  path must stay inside it, as the action contains paths within the
+  workspace.
+- The options mirror the action's inputs: `--project` for `project`,
+  `--schema` for `schema-path`, `--no-repository-match` for
+  `require-repository-match: false` and `--no-lint-yaml` for
+  `lint-yaml: false`.
+- The command exits `1` when any file has a finding or a check cannot
+  run, and `2` on a usage error.
+- Output is plain text. Under GitHub Actions, where `GITHUB_ACTIONS` is
+  `true`, it also writes `::error` annotations and the job summary. It
+  never writes step outputs; those belong to the action.
+- The lint stage needs a `yamllint` installed beside the command or on
+  `PATH`. `uv tool install` does not install one, for the licensing
+  reason in [How yamllint runs](#how-yamllint-runs); add it with
+  `uv tool install --with yamllint .`, install it yourself, or pass
+  `--no-lint-yaml`.
+- The command reads each path as given, as pre-commit passes it: a
+  leading or trailing space is part of the file name.
+
+## pre-commit hook
+
+This repository publishes an `info-yaml-validate` hook in
+`.pre-commit-hooks.yaml`. It runs the command over every staged file
+named `INFO.yaml` and installs yamllint into the hook's environment
+beside it. The schema ships with the hook and nothing reaches the
+network at run time, so the hook works under pre-commit.ci and needs
+no `ci.skip` entry.
+
+### In a repository
+
+Add the hook to the repository's `.pre-commit-config.yaml`, pinned to a
+release commit with a frozen comment, as for other hooks:
+
+```yaml
+  - repo: https://github.com/lfreleng-actions/info-yaml-validate-action
+    rev: <SHA>  # frozen: <release tag>
+    hooks:
+      - id: info-yaml-validate
+```
+
+The hook reads the project name from `.gitreview`. To name it, or to
+switch a check off, pass the options through `args`, and end them with
+`--`:
+
+```yaml
+      - id: info-yaml-validate
+        args: ["--project", "integration/distribution", "--"]
+```
+
+pre-commit puts `args` before the staged file names, and `args` set
+here replace the hook's default `["--"]`. Without the closing `--`,
+the command takes a staged path shaped like an option, such as
+`--project=other/INFO.yaml`, for that option, and leaves its file
+unchecked.
+
+Setting `additional_dependencies` on the hook replaces the yamllint the
+hook installs; keep `yamllint` in the list, or add `--no-lint-yaml`.
+
+### In a project organisation's linting fallback
+
+`generic-workflows` `linting.yaml` consults an organisation's
+`linting/.pre-commit-config.yaml` when a repository carries no
+configuration of its own. `INFO.yaml` belongs to Gerrit-mirrored
+project repositories, so the fallbacks that want this hook live in the
+project `.github` repositories (ONAP, O-RAN-SC, FD.io, OpenDaylight and
+others). Add the same entry to that file:
+
+```yaml
+repos:
+  - repo: https://github.com/lfreleng-actions/info-yaml-validate-action
+    rev: <SHA>  # frozen: <release tag>
+    hooks:
+      - id: info-yaml-validate
+```
+
+Rolling the hook into each fallback is a per-project migration step,
+tracked with
+[lfreleng-actions/generic-workflows#23](https://github.com/lfreleng-actions/generic-workflows/issues/23).
+
 ## Behaviour
 
 ### YAML lint configuration
@@ -161,9 +260,11 @@ hand edit.
 
 The install step runs whatever `lint-yaml` says, so that the shell
 never has to agree with the validator about which spellings of the
-input mean `false`. Running the script by hand, without
-`YAMLLINT_ENV_DIR` set, needs a `yamllint` on `PATH`, or
-`lint-yaml: false`.
+input mean `false`. Running the script by hand, or the
+`info-yaml-validate` command, without `YAMLLINT_ENV_DIR` set, needs a
+`yamllint` in the validator's own environment or on `PATH`, or the
+lint stage switched off. The pre-commit hook installs one into its own
+environment, and the validator runs that one first.
 
 yamllint applies the configuration's `locale` itself, and a `locale`
 the runner does not provide fails the run. `extends` may name a
@@ -229,7 +330,10 @@ into five review cycles.
   list, no shell, and the file path after `--`. The executable comes
   from the action's own synced environment by absolute path, never from
   a `PATH` search: on Windows that search includes the current
-  directory, which is the checkout under test. The child does not
+  directory, which is the checkout under test. The command and the
+  pre-commit hook take it from the validator's own environment first,
+  then search the absolute `PATH` entries, skipping any that name the
+  current directory. The child does not
   inherit `YAMLLINT_FILE_ENCODING` or `YAMLLINT_CONFIG_FILE`, so
   yamllint decodes the configuration the way the containment preflight
   did and reads the configuration the preflight examined. The action

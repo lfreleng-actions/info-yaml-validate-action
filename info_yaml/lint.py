@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import subprocess  # nosec B404 - runs the pinned yamllint executable alone
+import sysconfig
 from pathlib import Path, PurePath
 from typing import Any
 
@@ -256,34 +256,86 @@ def _failure_detail(completed: subprocess.CompletedProcess[str]) -> str:
     return f"exit status {completed.returncode}"
 
 
+def _executable_in(directory: Path) -> str | None:
+    """The yamllint executable in a virtual environment's scripts directory."""
+    for name in (YAMLLINT_COMMAND, f"{YAMLLINT_COMMAND}.exe"):
+        candidate = directory / name
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _interpreter_scripts_dir() -> Path:
+    """The scripts directory of the environment running this code.
+
+    A pre-commit hook, and ``uv tool install --with yamllint``, install
+    yamllint into the same environment as the validator, so its
+    executable sits beside the interpreter's own entry points.
+    """
+    return Path(sysconfig.get_path("scripts"))
+
+
+def _search_path() -> str | None:
+    """Search ``PATH`` for yamllint, never the current directory.
+
+    ``shutil.which`` would serve, except that on Windows it searches the
+    current directory first, whatever ``PATH`` says, and the current
+    directory is the checkout under test. Only absolute ``PATH`` entries
+    are searched, and an entry naming the current directory is skipped,
+    so a repository cannot supply the executable through either route.
+    """
+    names = [YAMLLINT_COMMAND]
+    if os.name == "nt":
+        extensions = os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+        names = [
+            f"{YAMLLINT_COMMAND}{ext}" for ext in extensions.split(os.pathsep) if ext
+        ]
+    cwd = Path.cwd().resolve()
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        directory = Path(entry)
+        if not entry or not directory.is_absolute():
+            continue
+        try:
+            if directory.resolve() == cwd:
+                continue
+        except OSError:
+            continue
+        for name in names:
+            candidate = directory / name
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return str(candidate)
+    return None
+
+
 def _yamllint_executable() -> str:
-    """Locate the yamllint command, preferring the action's own install.
+    """Locate the yamllint command, preferring an install beside the validator.
 
     With ``YAMLLINT_ENV_DIR`` set, the executable must sit in that
     environment's ``bin`` or ``Scripts`` directory, named as the
-    platform writes it; nothing else is tried. A ``PATH`` search would
-    be the wrong tool there: on Windows, ``shutil.which`` consults the
-    current directory, which is the checkout under test, so a
-    repository could supply the executable. Without the variable, as
-    when the script runs by hand, ``PATH`` decides.
+    platform writes it; nothing else is tried. Without the variable, as
+    when the script or the ``info-yaml-validate`` command runs outside
+    the action, the scripts directory of the running interpreter's
+    environment comes first, which is where a pre-commit hook installs
+    yamllint, and then ``PATH``. Neither lookup consults the checkout
+    under test, which ``shutil.which`` does on Windows through the
+    current directory, so a repository cannot supply the executable.
     """
     env_dir = os.environ.get(YAMLLINT_ENV_DIR_VAR, "").strip()
     if env_dir:
-        names = (YAMLLINT_COMMAND, f"{YAMLLINT_COMMAND}.exe")
         for sub in VENV_BIN_DIRS:
-            for candidate in (Path(env_dir) / sub / name for name in names):
-                if candidate.is_file():
-                    return str(candidate)
+            executable = _executable_in(Path(env_dir) / sub)
+            if executable is not None:
+                return executable
         raise InfoYamlError(
             f"'{YAMLLINT_COMMAND}' was not found in {YAMLLINT_ENV_DIR_VAR} "
             f"'{env_dir}'; the action's install step did not run or failed"
         )
-    executable = shutil.which(YAMLLINT_COMMAND)
+    executable = _executable_in(_interpreter_scripts_dir()) or _search_path()
     if executable is None:
         raise InfoYamlError(
             f"'{YAMLLINT_COMMAND}' is not on PATH; the action installs it "
-            "before this step runs, so set 'lint-yaml: false' or install it "
-            "when running the script by hand"
+            "before this step runs. Elsewhere, install it, or skip the lint "
+            "stage with 'lint-yaml: false' (--no-lint-yaml)"
         )
     return executable
 
