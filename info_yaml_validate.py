@@ -102,9 +102,9 @@ def main() -> int:
         return fail(exc)
     return run(
         workspace,
-        path=os.environ.get("INPUT_PATH", ""),
+        path=os.environ.get("INPUT_PATH", "").strip(),
         project=os.environ.get("INPUT_PROJECT", ""),
-        schema=os.environ.get("INPUT_SCHEMA_PATH", ""),
+        schema=os.environ.get("INPUT_SCHEMA_PATH", "").strip(),
         require_repository_match=require_repository_match,
         lint_enabled=lint_enabled,
     )

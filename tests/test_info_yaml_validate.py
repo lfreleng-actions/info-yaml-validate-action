@@ -1492,8 +1492,11 @@ def test_missing_yamllint_command_is_reported(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The command is installed by the action, not imported; its absence is an error."""
+    empty = workspace.parent / "empty"
+    empty.mkdir()
     monkeypatch.delenv("YAMLLINT_ENV_DIR", raising=False)
-    monkeypatch.setattr(lint.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(lint, "_interpreter_scripts_dir", lambda: empty)
+    monkeypatch.setenv("PATH", str(empty))
     code, records, _, out = _run_main(
         workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
     )
@@ -1545,6 +1548,87 @@ def test_env_dir_executable_wins_over_the_checkout_and_path(
     assert records["valid"] == "true"
     assert "from-env-dir" in out
     assert "from-checkout" not in out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="shell-script stand-ins")
+def test_interpreter_executable_wins_over_the_checkout_and_path(
+    workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Without YAMLLINT_ENV_DIR, the validator's own environment comes first.
+
+    A pre-commit hook installs yamllint beside the validator and leaves
+    YAMLLINT_ENV_DIR unset. The executable in the interpreter's scripts
+    directory must win over one in the checkout, with a PATH entry
+    standing in for the Windows current-directory search.
+    """
+    scripts = tmp_path / "hook-env" / "bin"
+    scripts.mkdir(parents=True)
+    _fake_yamllint(scripts, "from-hook-env")
+    _fake_yamllint(workspace, "from-checkout")
+    monkeypatch.delenv("YAMLLINT_ENV_DIR", raising=False)
+    monkeypatch.setattr(lint, "_interpreter_scripts_dir", lambda: scripts)
+    monkeypatch.setenv("PATH", f"{workspace}{os.pathsep}{os.environ['PATH']}")
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert records["valid"] == "true"
+    assert "from-hook-env" in out
+    assert "from-checkout" not in out
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="shell-script stand-ins")
+def test_path_search_skips_the_current_directory(
+    workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The PATH fallback never runs an executable from the checkout.
+
+    Neither a relative entry nor an absolute one naming the current
+    directory, which is the checkout under test, is searched.
+    """
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    installed = tmp_path / "installed"
+    installed.mkdir()
+    _fake_yamllint(installed, "from-path")
+    _fake_yamllint(workspace, "from-checkout")
+    monkeypatch.delenv("YAMLLINT_ENV_DIR", raising=False)
+    monkeypatch.setattr(lint, "_interpreter_scripts_dir", lambda: empty)
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join([".", "", str(workspace), str(installed)])
+    )
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert records["valid"] == "true"
+    assert "from-path" in out
+    assert "from-checkout" not in out
+
+
+def test_action_trims_its_path_and_schema_inputs(
+    workspace: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The action input is trimmed; the shared resolver takes paths literally."""
+    code, records, _, _ = _run_main(
+        workspace,
+        monkeypatch,
+        capsys,
+        LINT_FAILURE.read_text(encoding="utf-8"),
+        path="  INFO.yaml  ",
+        schema_path=" ",
+        lint_yaml="false",
+    )
+    assert code == 0
+    assert records["valid"] == "true"
 
 
 def test_empty_env_dir_does_not_fall_back_to_path(

@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-"""The validation core behind the action entry script.
+"""The validation core shared by the action entry script and the CLI.
 
 ``validate`` runs the yamllint, schema and repository checks over one
 file and returns a ``Result``; ``emit`` reports it; ``run`` does both and
 turns a fatal ``InfoYamlError`` into a failing exit code. A front-end
-only gathers the inputs.
+only gathers the inputs, from ``INPUT_*`` variables or the command line,
+so the action and the ``info-yaml-validate`` command cannot drift apart.
+
+Two switches separate the front-ends. ``github`` emits the workflow
+commands and the job summary that only a GitHub Actions runner reads;
+without it the report is plain text for a terminal. ``outputs`` writes
+the action's step outputs, which belong to the action alone.
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ from __future__ import annotations
 import configparser
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import yaml
 
@@ -36,18 +42,38 @@ from info_yaml.workspace import InfoYamlError, contain
 DEFAULT_INFO_PATH = "INFO.yaml"
 GITREVIEW_PATH = ".gitreview"
 
-# The bundled schema sits at the root of the action's checkout, beside
-# this package.
-BUNDLED_SCHEMA = Path(__file__).resolve().parent.parent / "schema" / "info-schema.yaml"
+# A built wheel carries the schema inside this package; the action's
+# checkout, and an editable install, keep it at the repository root.
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_PACKAGED_SCHEMA = _PACKAGE_DIR / "info-schema.yaml"
+BUNDLED_SCHEMA = (
+    _PACKAGED_SCHEMA
+    if _PACKAGED_SCHEMA.is_file()
+    else _PACKAGE_DIR.parent / "schema" / "info-schema.yaml"
+)
 
 # PyYAML's C loader is markedly faster and is present in most wheels, but
 # the pure-Python loader is a correct fallback where libyaml is absent.
 LOADER = yaml.CSafeLoader if yaml.__with_libyaml__ else yaml.SafeLoader
 
 
+def _write(stream: TextIO, line: str) -> None:
+    """Write one line, escaping what the stream's encoding cannot carry.
+
+    The report's markers are emoji. A runner's stdout is UTF-8, but a
+    hook's output may be captured through a stream in a legacy encoding
+    such as cp1252 on Windows, where writing them would raise
+    ``UnicodeEncodeError`` before the verdict was reported. Such
+    characters are written as backslash escapes instead.
+    """
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    text = f"{line}\n".encode(encoding, "backslashreplace").decode(encoding)
+    stream.write(text)
+
+
 def _out(line: str) -> None:
     """Write one line of the report to stdout, where the runner reads it."""
-    sys.stdout.write(f"{line}\n")
+    _write(sys.stdout, line)
 
 
 def read_text(path: Path, *, label: str) -> str:
@@ -94,9 +120,10 @@ def resolve_project(explicit: str, workspace: Path) -> str:
     gitreview = contain(GITREVIEW_PATH, workspace, label=".gitreview")
     if not gitreview.is_file():
         raise InfoYamlError(
-            "the 'project' input is empty and no .gitreview file was found. "
-            "Supply 'project' explicitly, or set "
-            "'require-repository-match: false' to skip the repository check."
+            "no project was given and no .gitreview file was found. Supply "
+            "the 'project' input (--project), or set "
+            "'require-repository-match: false' (--no-repository-match) to "
+            "skip the repository check."
         )
 
     # Interpolation off: ConfigParser applies BasicInterpolation by
@@ -114,7 +141,7 @@ def resolve_project(explicit: str, workspace: Path) -> str:
     if not project:
         raise InfoYamlError(
             ".gitreview contains no 'project' key under a [gerrit] section. "
-            "Supply the 'project' input explicitly instead."
+            "Supply the 'project' input (--project) explicitly instead."
         )
     # Gerrit records the project with a .git suffix; the repositories list
     # in INFO.yaml conventionally omits it.
@@ -122,19 +149,30 @@ def resolve_project(explicit: str, workspace: Path) -> str:
 
 
 def resolve_schema_path(explicit: str, workspace: Path) -> Path:
-    """Pick the schema to validate against, containing any caller path."""
-    if not explicit.strip():
+    """Pick the schema to validate against, containing any caller path.
+
+    The path is taken literally, as ``resolve_info_path`` takes its own.
+    """
+    if not explicit:
         return BUNDLED_SCHEMA
-    return contain(explicit.strip(), workspace, label="schema-path")
+    return contain(explicit, workspace, label="schema-path")
 
 
 def resolve_info_path(explicit: str, workspace: Path) -> Path:
-    """Resolve the INFO.yaml location, containing it within the workspace."""
-    return contain(explicit.strip() or DEFAULT_INFO_PATH, workspace, label="path")
+    """Resolve the INFO.yaml location, containing it within the workspace.
+
+    The path is taken literally: pre-commit passes file names as git
+    records them, and a leading or trailing space is part of the name.
+    The action trims its own input before it gets here.
+    """
+    return contain(explicit or DEFAULT_INFO_PATH, workspace, label="path")
 
 
-def emit(result: Result, info_path: str) -> int:
+def emit(result: Result, info_path: str, *, github: bool = True) -> int:
     """Write console output, summary, annotations and return an exit code.
+
+    The summary and the annotations are written only when ``github`` is
+    set; the plain diagnostic lines are written either way.
 
     Everything interpolated here passes through ``sanitise`` first. The
     runner parses stdout for workflow commands, so a value carrying a
@@ -150,7 +188,8 @@ def emit(result: Result, info_path: str) -> int:
     for entry in result.repositories:
         _out(f"    - {sanitise(entry)}")
 
-    append_to_env_file("GITHUB_STEP_SUMMARY", render_summary(result, info_path))
+    if github:
+        append_to_env_file("GITHUB_STEP_SUMMARY", render_summary(result, info_path))
 
     location = escape_property(info_path)
     if result.lint_checked:
@@ -159,16 +198,20 @@ def emit(result: Result, info_path: str) -> int:
         _out(f"  YAML lint: {sanitise(item.describe())}")
         command = "error" if item.level == "error" else "warning"
         message = escape_data(f"yamllint: {item.describe()}")
-        _out(
-            f"::{command} file={location},line={item.line},col={item.column}::{message}"
-        )
+        if github:
+            _out(
+                f"::{command} file={location},line={item.line},"
+                f"col={item.column}::{message}"
+            )
     for finding in result.schema_errors:
         _out(f"  Schema: {sanitise(finding)}")
-        message = escape_data(f"INFO.yaml schema violation at {finding}")
-        _out(f"::error file={location}::{message}")
+        if github:
+            message = escape_data(f"INFO.yaml schema violation at {finding}")
+            _out(f"::error file={location}::{message}")
     for finding in result.repository_errors:
         _out(f"  Repository: {sanitise(finding)}")
-        _out(f"::error file={location}::{escape_data(finding)}")
+        if github:
+            _out(f"::error file={location}::{escape_data(finding)}")
 
     if result.valid:
         skipped = [
@@ -276,12 +319,16 @@ def validate(
     return result, display_path
 
 
-def fail(exc: InfoYamlError) -> int:
+def fail(exc: InfoYamlError, *, github: bool = True, outputs: bool = True) -> int:
     """Report a fatal error and publish failing outputs."""
-    _out(f"::error::{escape_data(str(exc))}")
-    # Publish outputs even here, so a caller running the step under
-    # continue-on-error reads 'false' rather than an empty string.
-    write_failure_outputs()
+    if github:
+        _out(f"::error::{escape_data(str(exc))}")
+    else:
+        _write(sys.stderr, f"error: {sanitise(str(exc))}")
+    if outputs:
+        # Publish outputs even here, so a caller running the step under
+        # continue-on-error reads 'false' rather than an empty string.
+        write_failure_outputs()
     return 1
 
 
@@ -293,6 +340,8 @@ def run(
     schema: str,
     require_repository_match: bool,
     lint_enabled: bool,
+    github: bool = True,
+    outputs: bool = True,
 ) -> int:
     """Validate one file, report the outcome and return an exit code."""
     try:
@@ -305,6 +354,7 @@ def run(
             lint_enabled=lint_enabled,
         )
     except InfoYamlError as exc:
-        return fail(exc)
-    write_outputs(result)
-    return emit(result, display_path)
+        return fail(exc, github=github, outputs=outputs)
+    if outputs:
+        write_outputs(result)
+    return emit(result, display_path, github=github)

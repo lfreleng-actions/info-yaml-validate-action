@@ -1,0 +1,20 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+- id: info-yaml-validate
+  name: INFO.yaml validation
+  description: >
+    Validate INFO.yaml against the schema and its declared repository
+  entry: info-yaml-validate
+  language: python
+  files: '(^|/)INFO\.yaml$'
+  pass_filenames: true
+  # Ends the options, so a staged path shaped like one, such as
+  # '--project=x/INFO.yaml', is read as a file name. pre-commit puts
+  # args before the file names, and a user's args replace these.
+  args: ["--"]
+  # yamllint is GPL-3.0, so it is not a dependency of the validator,
+  # which runs it as a separate process. It is installed beside the
+  # hook here, as the action installs it beside the script.
+  additional_dependencies: ["yamllint>=1.35"]
