@@ -16,3 +16,20 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 15
+
+  # uv.lock pins the 'lint' group, which the action installs to run
+  # yamllint, so bumps land in the lock alone and the pinned yamllint
+  # moves without a manual edit. The validator's own dependencies are
+  # excluded: Dependabot does not refresh the PEP 723 script lock, and
+  # a bump of uv.lock alone would leave the two locks disagreeing.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "Build(deps)"
+    cooldown:
+      default-days: 7
+    allow:
+      - dependency-name: "yamllint"
+    open-pull-requests-limit: 5

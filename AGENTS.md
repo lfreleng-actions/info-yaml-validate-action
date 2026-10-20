@@ -46,3 +46,11 @@ both locks:
 uv lock
 uv lock --script info_yaml_validate.py
 ```
+
+yamllint is the exception. Being GPL-3.0, it stays out of the
+validator's dependencies and must not appear in the script header or
+its lock. It lives in the `lint` dependency group of `pyproject.toml`
+alone, which the action syncs from `uv.lock` into a private
+environment and runs as a separate process. Dependabot's `uv`
+ecosystem bumps that pin; the group's `uv.lock` entry alone decides
+its version.

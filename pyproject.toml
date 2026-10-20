@@ -11,7 +11,13 @@ license = "Apache-2.0"
 dependencies = ["jsonschema[format-nongpl]>=4.23", "PyYAML>=6", "referencing>=0.36"]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+# yamllint is GPL-3.0 and is not a runtime dependency: the action runs the
+# packaged command as a separate process and imports nothing from it. The
+# 'lint' group exists so the action can install that command on its own,
+# locked and hash-checked through uv.lock, which Dependabot keeps current;
+# the tests need the same command on PATH, which 'uv run' provides.
+lint = ["yamllint>=1.35"]
+dev = ["pytest>=8", { include-group = "lint" }]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
