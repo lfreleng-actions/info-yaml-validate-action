@@ -47,10 +47,11 @@ branch and executed the result.
 
 This script is the action's entry point. It reads its inputs from
 ``INPUT_*`` environment variables (the GitHub Actions convention) and
-hands them to the validation core in ``info_yaml.validate``. The
-yamllint stage lives in ``info_yaml.lint``, the schema and repository
-checks in ``info_yaml.checks``, workspace containment in
-``info_yaml.workspace`` and reporting in ``info_yaml.report``.
+hands them to the validation core in ``info_yaml.validate``, which the
+``info-yaml-validate`` command in ``info_yaml.cli`` shares. The yamllint
+stage lives in ``info_yaml.lint``, the schema and repository checks in
+``info_yaml.checks``, workspace containment in ``info_yaml.workspace``
+and reporting in ``info_yaml.report``.
 """
 
 from __future__ import annotations
