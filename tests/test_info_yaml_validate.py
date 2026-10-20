@@ -18,6 +18,7 @@ import yaml
 
 import info_yaml_validate as iyv
 from info_yaml import lint, report
+from info_yaml import validate as core
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -66,7 +67,7 @@ VALID_INFO: dict[str, Any] = {
 @pytest.fixture
 def schema() -> Any:
     """The schema bundled with the action."""
-    return yaml.safe_load(iyv.BUNDLED_SCHEMA.read_text(encoding="utf-8"))
+    return yaml.safe_load(core.BUNDLED_SCHEMA.read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------
@@ -75,12 +76,12 @@ def schema() -> Any:
 
 
 def test_valid_document_produces_no_findings(schema: Any) -> None:
-    assert iyv.validate_schema(VALID_INFO, schema) == []
+    assert core.validate_schema(VALID_INFO, schema) == []
 
 
 def test_missing_required_key_is_reported(schema: Any) -> None:
     document = {key: value for key, value in VALID_INFO.items() if key != "committers"}
-    findings = iyv.validate_schema(document, schema)
+    findings = core.validate_schema(document, schema)
     assert any("committers" in finding for finding in findings)
 
 
@@ -91,12 +92,12 @@ def test_all_findings_are_collected_not_just_the_first(schema: Any) -> None:
         for key, value in VALID_INFO.items()
         if key not in {"committers", "tsc", "repositories"}
     }
-    assert len(iyv.validate_schema(document, schema)) >= 3
+    assert len(core.validate_schema(document, schema)) >= 3
 
 
 def test_invalid_lifecycle_state_is_reported(schema: Any) -> None:
     document = dict(VALID_INFO, lifecycle_state="Flourishing")
-    findings = iyv.validate_schema(document, schema)
+    findings = core.validate_schema(document, schema)
     assert any("lifecycle_state" in finding for finding in findings)
 
 
@@ -113,34 +114,34 @@ def test_every_documented_lifecycle_state_is_accepted(schema: Any) -> None:
         "Integration",
     ):
         document = dict(VALID_INFO, lifecycle_state=state)
-        assert iyv.validate_schema(document, schema) == [], state
+        assert core.validate_schema(document, schema) == [], state
 
 
 def test_unknown_key_in_user_object_is_reported(schema: Any) -> None:
     """The user object sets additionalProperties: false."""
     lead = dict(VALID_INFO["project_lead"], nickname="ada")
     document = dict(VALID_INFO, project_lead=lead)
-    findings = iyv.validate_schema(document, schema)
+    findings = core.validate_schema(document, schema)
     assert any("project_lead" in finding for finding in findings)
 
 
 def test_unknown_type_in_schema_is_reported_against_the_schema() -> None:
     """A broken caller schema must not read as a document finding."""
-    with pytest.raises(iyv.InfoYamlError, match=r"schema itself.*\$\.type"):
-        iyv.validate_schema(VALID_INFO, {"type": "not-a-real-type"})
+    with pytest.raises(core.InfoYamlError, match=r"schema itself.*\$\.type"):
+        core.validate_schema(VALID_INFO, {"type": "not-a-real-type"})
 
 
 def test_unparsable_pattern_is_reported_against_the_schema() -> None:
     """The metaschema checks 'pattern' as a regex before it reaches re.search."""
     schema = {"type": "object", "properties": {"project": {"pattern": "["}}}
-    with pytest.raises(iyv.InfoYamlError, match="schema itself is not valid"):
-        iyv.validate_schema({"project": "example"}, schema)
+    with pytest.raises(core.InfoYamlError, match="schema itself is not valid"):
+        core.validate_schema({"project": "example"}, schema)
 
 
 def test_unparsable_pattern_properties_is_reported() -> None:
     schema = {"type": "object", "patternProperties": {"(": {"type": "string"}}}
-    with pytest.raises(iyv.InfoYamlError, match="schema itself is not valid"):
-        iyv.validate_schema({"project": "example"}, schema)
+    with pytest.raises(core.InfoYamlError, match="schema itself is not valid"):
+        core.validate_schema({"project": "example"}, schema)
 
 
 # The metaschema only describes the keywords it knows, so a subschema
@@ -169,8 +170,8 @@ def test_defect_behind_internal_ref_is_reported_against_the_schema(
     # The defect is invisible to the metaschema check...
     jsonschema.Draft202012Validator.check_schema(schema)
     # ...and must still surface as a schema error, not an uncaught exception.
-    with pytest.raises(iyv.InfoYamlError, match="schema could not be applied"):
-        iyv.validate_schema({"project": "example"}, schema)
+    with pytest.raises(core.InfoYamlError, match="schema could not be applied"):
+        core.validate_schema({"project": "example"}, schema)
 
 
 def test_bundled_schema_is_valid_draft_2020_12(schema: Any) -> None:
@@ -181,7 +182,7 @@ def test_bundled_schema_is_valid_draft_2020_12(schema: Any) -> None:
 def test_issue_tracking_key_is_required(schema: Any, key: str) -> None:
     tracking = {k: v for k, v in VALID_INFO["issue_tracking"].items() if k != key}
     document = dict(VALID_INFO, issue_tracking=tracking)
-    findings = iyv.validate_schema(document, schema)
+    findings = core.validate_schema(document, schema)
     assert any(
         finding.startswith("issue_tracking:") and f"'{key}'" in finding
         for finding in findings
@@ -191,7 +192,7 @@ def test_issue_tracking_key_is_required(schema: Any, key: str) -> None:
 def test_invalid_uri_is_reported(schema: Any) -> None:
     tracking = dict(VALID_INFO["issue_tracking"], url="not a valid uri")
     document = dict(VALID_INFO, issue_tracking=tracking)
-    findings = iyv.validate_schema(document, schema)
+    findings = core.validate_schema(document, schema)
     assert any(finding.startswith("issue_tracking.url:") for finding in findings)
 
 
@@ -201,8 +202,8 @@ def test_invalid_caller_schema_fails_before_the_document_is_checked() -> None:
         "type": "object",
         "properties": {"email": {"type": "string", "required": False}},
     }
-    with pytest.raises(iyv.InfoYamlError, match=r"schema itself.*required"):
-        iyv.validate_schema({"email": "ada@example.org"}, schema)
+    with pytest.raises(core.InfoYamlError, match=r"schema itself.*required"):
+        core.validate_schema({"email": "ada@example.org"}, schema)
 
 
 @pytest.mark.parametrize(
@@ -218,13 +219,13 @@ def test_invalid_caller_schema_fails_before_the_document_is_checked() -> None:
     ],
 )
 def test_fixture_schema_verdict(schema: Any, fixture: str, valid: bool) -> None:
-    document = iyv.load_yaml(FIXTURES / fixture / "INFO.yaml", label="INFO.yaml")
-    assert (iyv.validate_schema(document, schema) == []) is valid
+    document = core.load_yaml(FIXTURES / fixture / "INFO.yaml", label="INFO.yaml")
+    assert (core.validate_schema(document, schema) == []) is valid
 
 
 def test_bundled_schema_still_validates_a_good_document(schema: Any) -> None:
     """Non-conformance must stay harmless in practice, not just in theory."""
-    assert iyv.validate_schema(VALID_INFO, schema) == []
+    assert core.validate_schema(VALID_INFO, schema) == []
 
 
 def test_findings_are_ordered_deterministically(schema: Any) -> None:
@@ -234,7 +235,7 @@ def test_findings_are_ordered_deterministically(schema: Any) -> None:
         for key, value in VALID_INFO.items()
         if key not in {"committers", "tsc"}
     }
-    assert iyv.validate_schema(document, schema) == iyv.validate_schema(
+    assert core.validate_schema(document, schema) == core.validate_schema(
         document, schema
     )
 
@@ -247,12 +248,12 @@ def test_findings_are_ordered_deterministically(schema: Any) -> None:
 def test_error_path_renders_nested_keys_and_indices(schema: Any) -> None:
     committers = [dict(VALID_INFO["committers"][0], nickname="ada")]
     document = dict(VALID_INFO, committers=committers)
-    findings = iyv.validate_schema(document, schema)
+    findings = core.validate_schema(document, schema)
     assert any(finding.startswith("committers[0]:") for finding in findings)
 
 
 def test_root_level_error_reports_document_root() -> None:
-    findings = iyv.validate_schema([], {"type": "object"})
+    findings = core.validate_schema([], {"type": "object"})
     assert findings and findings[0].startswith("(document root):")
 
 
@@ -262,54 +263,54 @@ def test_root_level_error_reports_document_root() -> None:
 
 
 def test_exact_repository_match_passes() -> None:
-    assert iyv.check_repositories(["example"], "example") == []
+    assert core.check_repositories(["example"], "example") == []
 
 
 def test_ancestor_repository_is_permitted() -> None:
     """A subproject may carry an INFO.yaml naming its parent project."""
-    assert iyv.check_repositories(["integration"], "integration/distribution") == []
+    assert core.check_repositories(["integration"], "integration/distribution") == []
 
 
 def test_unrelated_repository_is_rejected() -> None:
-    findings = iyv.check_repositories(["something-else"], "example")
+    findings = core.check_repositories(["something-else"], "example")
     assert len(findings) == 1
     assert "something-else" in findings[0]
 
 
 def test_partial_name_is_not_treated_as_an_ancestor() -> None:
     """'integ' is a string prefix of 'integration' but not a path ancestor."""
-    findings = iyv.check_repositories(["integ"], "integration")
+    findings = core.check_repositories(["integ"], "integration")
     assert len(findings) == 1
 
 
 def test_descendant_repository_is_rejected() -> None:
     """The rule permits ancestors, not children."""
-    findings = iyv.check_repositories(["integration/distribution"], "integration")
+    findings = core.check_repositories(["integration/distribution"], "integration")
     assert len(findings) == 1
 
 
 def test_every_offending_entry_is_reported() -> None:
-    findings = iyv.check_repositories(["bad-one", "example", "bad-two"], "example")
+    findings = core.check_repositories(["bad-one", "example", "bad-two"], "example")
     assert len(findings) == 2
 
 
 def test_empty_repository_list_is_a_finding() -> None:
     """Silence here would let a file declaring nothing pass the check."""
-    findings = iyv.check_repositories([], "example")
+    findings = core.check_repositories([], "example")
     assert len(findings) == 1
     assert "no repositories" in findings[0]
 
 
 def test_extract_repositories_preserves_non_string_entries() -> None:
     """The schema constrains nothing here, so nothing else reports them."""
-    entries, structural = iyv.extract_repositories({"repositories": ["example", 42]})
+    entries, structural = core.extract_repositories({"repositories": ["example", 42]})
     assert entries == ["example", 42]
     assert structural == []
 
 
 def test_non_string_entry_is_reported() -> None:
     """Discarding it would let repositories: ['example', 42] pass clean."""
-    findings = iyv.check_repositories(["example", 42], "example")
+    findings = core.check_repositories(["example", 42], "example")
     assert len(findings) == 1
     assert "not a string" in findings[0]
 
@@ -317,24 +318,24 @@ def test_non_string_entry_is_reported() -> None:
 def test_non_string_entry_survives_the_bundled_schema(schema: Any) -> None:
     """Proves the repository check is the only thing that can catch it."""
     document = dict(VALID_INFO, repositories=["example", 42])
-    assert iyv.validate_schema(document, schema) == []
+    assert core.validate_schema(document, schema) == []
 
 
 def test_missing_repositories_key_is_a_structural_finding() -> None:
-    entries, structural = iyv.extract_repositories({"project": "example"})
+    entries, structural = core.extract_repositories({"project": "example"})
     assert entries == []
     assert len(structural) == 1
     assert "no 'repositories' key" in structural[0]
 
 
 def test_repositories_of_the_wrong_type_is_a_structural_finding() -> None:
-    entries, structural = iyv.extract_repositories({"repositories": "example"})
+    entries, structural = core.extract_repositories({"repositories": "example"})
     assert entries == []
     assert "must be a list" in structural[0]
 
 
 def test_non_mapping_document_is_a_structural_finding() -> None:
-    entries, structural = iyv.extract_repositories([])
+    entries, structural = core.extract_repositories([])
     assert entries == []
     assert "mapping" in structural[0]
 
@@ -354,7 +355,7 @@ def test_a_structural_problem_suppresses_the_entry_check(document: Any) -> None:
     check would append "no repositories are declared" beneath a finding
     that just explained the key holds the wrong type.
     """
-    entries, structural = iyv.extract_repositories(document)
+    entries, structural = core.extract_repositories(document)
     assert len(structural) == 1
     assert entries == []
     # The guard in main() picks one or the other, never both.
@@ -368,7 +369,7 @@ def test_a_structural_problem_suppresses_the_entry_check(document: Any) -> None:
 
 def test_explicit_project_wins(tmp_path: Path) -> None:
     (tmp_path / ".gitreview").write_text("[gerrit]\nproject=other.git\n")
-    assert iyv.resolve_project("explicit", tmp_path) == "explicit"
+    assert core.resolve_project("explicit", tmp_path) == "explicit"
 
 
 def test_project_read_from_gitreview(tmp_path: Path) -> None:
@@ -382,43 +383,43 @@ def test_project_read_from_gitreview(tmp_path: Path) -> None:
             """
         )
     )
-    assert iyv.resolve_project("", tmp_path) == "integration/distribution"
+    assert core.resolve_project("", tmp_path) == "integration/distribution"
 
 
 def test_gitreview_without_git_suffix_is_used_verbatim(tmp_path: Path) -> None:
     (tmp_path / ".gitreview").write_text("[gerrit]\nproject=example\n")
-    assert iyv.resolve_project("", tmp_path) == "example"
+    assert core.resolve_project("", tmp_path) == "example"
 
 
 def test_missing_gitreview_fails_loudly(tmp_path: Path) -> None:
     """Guessing would make the check pass against an unnamed project."""
-    with pytest.raises(iyv.InfoYamlError, match="no .gitreview"):
-        iyv.resolve_project("", tmp_path)
+    with pytest.raises(core.InfoYamlError, match="no .gitreview"):
+        core.resolve_project("", tmp_path)
 
 
 def test_gitreview_without_project_key_fails(tmp_path: Path) -> None:
     (tmp_path / ".gitreview").write_text("[gerrit]\nhost=gerrit.example.org\n")
-    with pytest.raises(iyv.InfoYamlError, match="no 'project' key"):
-        iyv.resolve_project("", tmp_path)
+    with pytest.raises(core.InfoYamlError, match="no 'project' key"):
+        core.resolve_project("", tmp_path)
 
 
 def test_unparseable_gitreview_fails(tmp_path: Path) -> None:
     (tmp_path / ".gitreview").write_text("this is not ini\n[[[\n")
-    with pytest.raises(iyv.InfoYamlError):
-        iyv.resolve_project("", tmp_path)
+    with pytest.raises(core.InfoYamlError):
+        core.resolve_project("", tmp_path)
 
 
 def test_percent_in_project_is_read_verbatim(tmp_path: Path) -> None:
     """ConfigParser interpolation would otherwise raise on a literal %."""
     (tmp_path / ".gitreview").write_text("[gerrit]\nproject=odd%name.git\n")
-    assert iyv.resolve_project("", tmp_path) == "odd%name"
+    assert core.resolve_project("", tmp_path) == "odd%name"
 
 
 def test_interpolation_sequence_is_not_expanded(tmp_path: Path) -> None:
     (tmp_path / ".gitreview").write_text(
         "[gerrit]\nhost=example.org\nproject=%(host)s/thing.git\n"
     )
-    assert iyv.resolve_project("", tmp_path) == "%(host)s/thing"
+    assert core.resolve_project("", tmp_path) == "%(host)s/thing"
 
 
 # --------------------------------------------------------------------------
@@ -427,25 +428,25 @@ def test_interpolation_sequence_is_not_expanded(tmp_path: Path) -> None:
 
 
 def test_info_path_defaults_to_repository_root(tmp_path: Path) -> None:
-    assert iyv.resolve_info_path("", tmp_path) == (tmp_path / "INFO.yaml").resolve()
+    assert core.resolve_info_path("", tmp_path) == (tmp_path / "INFO.yaml").resolve()
 
 
 def test_info_path_escaping_the_workspace_is_rejected(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    with pytest.raises(iyv.InfoYamlError, match="outside the workspace"):
-        iyv.resolve_info_path("../secret.yaml", workspace)
+    with pytest.raises(core.InfoYamlError, match="outside the workspace"):
+        core.resolve_info_path("../secret.yaml", workspace)
 
 
 def test_schema_path_escaping_the_workspace_is_rejected(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    with pytest.raises(iyv.InfoYamlError, match="outside the workspace"):
-        iyv.resolve_schema_path("../evil-schema.yaml", workspace)
+    with pytest.raises(core.InfoYamlError, match="outside the workspace"):
+        core.resolve_schema_path("../evil-schema.yaml", workspace)
 
 
 def test_empty_schema_path_selects_the_bundled_schema(tmp_path: Path) -> None:
-    assert iyv.resolve_schema_path("", tmp_path) == iyv.BUNDLED_SCHEMA
+    assert core.resolve_schema_path("", tmp_path) == core.BUNDLED_SCHEMA
 
 
 # --------------------------------------------------------------------------
@@ -476,8 +477,8 @@ def _workspace(tmp_path: Path) -> Path:
 def test_symlinked_info_path_cannot_escape(tmp_path: Path, escape_target: Path) -> None:
     workspace = _workspace(tmp_path)
     (workspace / "INFO.yaml").symlink_to(escape_target)
-    with pytest.raises(iyv.InfoYamlError, match="outside the workspace"):
-        iyv.resolve_info_path("", workspace)
+    with pytest.raises(core.InfoYamlError, match="outside the workspace"):
+        core.resolve_info_path("", workspace)
 
 
 def test_symlinked_schema_path_cannot_escape(
@@ -485,16 +486,16 @@ def test_symlinked_schema_path_cannot_escape(
 ) -> None:
     workspace = _workspace(tmp_path)
     (workspace / "schema.yaml").symlink_to(escape_target)
-    with pytest.raises(iyv.InfoYamlError, match="outside the workspace"):
-        iyv.resolve_schema_path("schema.yaml", workspace)
+    with pytest.raises(core.InfoYamlError, match="outside the workspace"):
+        core.resolve_schema_path("schema.yaml", workspace)
 
 
 def test_symlinked_gitreview_cannot_escape(tmp_path: Path, escape_target: Path) -> None:
     """No workflow input names .gitreview, but the repository owns it."""
     workspace = _workspace(tmp_path)
     (workspace / ".gitreview").symlink_to(escape_target)
-    with pytest.raises(iyv.InfoYamlError, match="outside the workspace"):
-        iyv.resolve_project("", workspace)
+    with pytest.raises(core.InfoYamlError, match="outside the workspace"):
+        core.resolve_project("", workspace)
 
 
 def test_symlink_within_the_workspace_still_works(tmp_path: Path) -> None:
@@ -502,14 +503,14 @@ def test_symlink_within_the_workspace_still_works(tmp_path: Path) -> None:
     workspace = _workspace(tmp_path)
     (workspace / "real.yaml").write_text("project: example\n")
     (workspace / "INFO.yaml").symlink_to(workspace / "real.yaml")
-    assert iyv.resolve_info_path("", workspace) == (workspace / "real.yaml").resolve()
+    assert core.resolve_info_path("", workspace) == (workspace / "real.yaml").resolve()
 
 
 def test_bundled_schema_exists_and_parses() -> None:
     """The action ships the schema; a missing file breaks every consumer."""
-    assert iyv.BUNDLED_SCHEMA.is_file()
+    assert core.BUNDLED_SCHEMA.is_file()
     assert isinstance(
-        yaml.safe_load(iyv.BUNDLED_SCHEMA.read_text(encoding="utf-8")), dict
+        yaml.safe_load(core.BUNDLED_SCHEMA.read_text(encoding="utf-8")), dict
     )
 
 
@@ -519,22 +520,22 @@ def test_bundled_schema_exists_and_parses() -> None:
 
 
 def test_missing_file_reports_the_path(tmp_path: Path) -> None:
-    with pytest.raises(iyv.InfoYamlError, match="not found"):
-        iyv.load_yaml(tmp_path / "absent.yaml", label="INFO.yaml")
+    with pytest.raises(core.InfoYamlError, match="not found"):
+        core.load_yaml(tmp_path / "absent.yaml", label="INFO.yaml")
 
 
 def test_malformed_yaml_is_reported(tmp_path: Path) -> None:
     path = tmp_path / "INFO.yaml"
     path.write_text("project: [unclosed\n")
-    with pytest.raises(iyv.InfoYamlError, match="not valid YAML"):
-        iyv.load_yaml(path, label="INFO.yaml")
+    with pytest.raises(core.InfoYamlError, match="not valid YAML"):
+        core.load_yaml(path, label="INFO.yaml")
 
 
 def test_non_utf8_file_is_reported(tmp_path: Path) -> None:
     path = tmp_path / "INFO.yaml"
     path.write_bytes(b"project: \xff\xfe\n")
-    with pytest.raises(iyv.InfoYamlError, match="not valid UTF-8"):
-        iyv.load_yaml(path, label="INFO.yaml")
+    with pytest.raises(core.InfoYamlError, match="not valid UTF-8"):
+        core.load_yaml(path, label="INFO.yaml")
 
 
 # --------------------------------------------------------------------------
@@ -561,7 +562,7 @@ def test_falsy_boolean_inputs(value: str) -> None:
 @pytest.mark.parametrize("value", ["enabled", "disabled", "nonsense", "2", "y"])
 def test_unrecognised_boolean_input_is_rejected(value: str) -> None:
     """A mis-spelling must not quietly switch a gate off."""
-    with pytest.raises(iyv.InfoYamlError, match="must be a boolean"):
+    with pytest.raises(core.InfoYamlError, match="must be a boolean"):
         iyv._as_bool(value, default=True, name="require-repository-match")
 
 
@@ -581,8 +582,8 @@ def test_external_https_reference_is_refused() -> None:
         "type": "object",
         "properties": {"project": {"$ref": "https://example.org/schema.json"}},
     }
-    with pytest.raises(iyv.InfoYamlError, match="external resource"):
-        iyv.validate_schema({"project": "example"}, schema)
+    with pytest.raises(core.InfoYamlError, match="external resource"):
+        core.validate_schema({"project": "example"}, schema)
 
 
 def test_external_file_reference_is_refused() -> None:
@@ -591,8 +592,8 @@ def test_external_file_reference_is_refused() -> None:
         "type": "object",
         "properties": {"project": {"$ref": "file:///etc/passwd"}},
     }
-    with pytest.raises(iyv.InfoYamlError, match="external resource"):
-        iyv.validate_schema({"project": "example"}, schema)
+    with pytest.raises(core.InfoYamlError, match="external resource"):
+        core.validate_schema({"project": "example"}, schema)
 
 
 def test_internal_reference_still_resolves() -> None:
@@ -602,8 +603,8 @@ def test_internal_reference_still_resolves() -> None:
         "type": "object",
         "properties": {"project": {"$ref": "#/definitions/name"}},
     }
-    assert iyv.validate_schema({"project": "example"}, schema) == []
-    assert iyv.validate_schema({"project": 42}, schema) != []
+    assert core.validate_schema({"project": "example"}, schema) == []
+    assert core.validate_schema({"project": 42}, schema) != []
 
 
 # --------------------------------------------------------------------------
@@ -763,7 +764,7 @@ def test_console_output_cannot_issue_a_workflow_command(
         repositories=["a\n::set-output name=valid::true"],
         repository_errors=["finding\n::warning::forged"],
     )
-    iyv.emit(result, "INFO.yaml")
+    core.emit(result, "INFO.yaml")
 
     commands = [
         line
@@ -1708,7 +1709,7 @@ def test_lint_annotation_cannot_issue_a_workflow_command(
     finding = report.LintFinding(
         line=1, column=1, level="error", rule="x", message="a\n::warning::forged"
     )
-    iyv.emit(report.Result(project="example", lint_findings=[finding]), "INFO.yaml")
+    core.emit(report.Result(project="example", lint_findings=[finding]), "INFO.yaml")
     commands = [
         line
         for line in capsys.readouterr().out.splitlines()
