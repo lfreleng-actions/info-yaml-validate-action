@@ -79,8 +79,27 @@ runs:
     - name: "Install uv"
       # yamllint disable-line rule:line-length
       uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      # setup-uv runs 'uv python find' in its working directory, and
+      # runs the interpreter it finds, to report a Python version.
+      # The lookup searches that directory and its parents for a
+      # .venv, so it runs in this action's own directory, which for
+      # a published action is outside the workspace: a .venv or
+      # .python-version in the checkout under test is then never
+      # searched. UV_NO_CONFIG, on this step only, stops the lookup
+      # reading a .python-version. UV_SYSTEM_PYTHON, also on this
+      # step only, makes the lookup skip virtual environments,
+      # including a workspace .venv above an action checked out
+      # inside the workspace. setup-uv also reads any
+      # required-version or cache-dir from uv.toml or pyproject.toml
+      # in that directory, which this action does not set, and keys
+      # the cache on the lock files there, which decide what it
+      # installs. The input exports nothing to later steps.
+      env:
+        UV_NO_CONFIG: "1"
+        UV_SYSTEM_PYTHON: "1"
       with:
         version: "0.13.4"
+        working-directory: ${{ github.action_path }}
     - name: "Install yamllint"
       shell: bash
       env:
@@ -94,9 +113,16 @@ runs:
         # overwrites a yamllint the runner already has.
         UV_PROJECT_ENVIRONMENT: ${{ runner.temp }}/info-yaml-validate/lint
       run: |
-        # Install the locked yamllint into a private environment
-        uv sync --locked --only-group lint --no-install-project \
-          --project "${ACTION_PATH}"
+        # Install the locked yamllint into a private environment.
+        # --no-config: when this action's checkout sits inside the
+        # workspace, uv would otherwise read a .python-version or
+        # uv.toml from the checkout under test, which can name the
+        # interpreter uv runs or change the package index. With
+        # --project, uv sync does not look for a .venv in the working
+        # directory or its parents; the environment's base interpreter,
+        # which later runs yamllint, comes from uv's own search.
+        uv sync --no-config --locked --only-group lint \
+          --no-install-project --project "${ACTION_PATH}"
     - name: "Validate INFO.yaml"
       id: validate
       shell: bash
@@ -114,6 +140,21 @@ runs:
       run: |
         # Validate the consumer's checked-out repository (the workspace),
         # running the script from this action's own checkout so the
-        # bundled schema resolves beside it.
+        # bundled schema resolves beside it. Run from the workspace,
+        # 'uv run' would take its interpreter from a .venv there or in
+        # a parent, so the interpreter is found first from this
+        # action's directory and passed by absolute path. --system
+        # skips every virtual environment, including the workspace's
+        # when this action's checkout sits inside it, and the request
+        # matches the script's requires-python. --no-config stops uv
+        # reading a .python-version or uv.toml from the workspace; the
+        # script lock still pins every dependency.
+        if ! py="$(cd "$ACTION_PATH" &&
+          uv python find --no-config --system '>=3.10')" ||
+          [ -z "$py" ]; then
+          echo "Error: no Python >=3.10 was found for the validator ❌" >&2
+          exit 1
+        fi
         cd "$GITHUB_WORKSPACE"
-        uv run --locked --script "${ACTION_PATH}/info_yaml_validate.py"
+        uv run --no-config --locked --python "$py" --script \
+          "${ACTION_PATH}/info_yaml_validate.py"
