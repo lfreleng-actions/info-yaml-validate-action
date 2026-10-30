@@ -53,4 +53,4 @@ pythonPlatform = "All"
 typeCheckingMode = "standard"
 # Matches the paths the pre-commit hook passes, so a bare basedpyright
 # run or an editor's language server analyses the same set.
-include = ["info_yaml", "info_yaml_validate.py", "tests"]
+include = ["info_yaml", "info_yaml_validate.py", "scripts", "tests"]

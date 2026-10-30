@@ -130,7 +130,7 @@ repos:
       - id: basedpyright
         # Fail on warnings as well as errors, over the same paths as
         # [tool.basedpyright] include in pyproject.toml.
-        args: [--warnings, info_yaml, info_yaml_validate.py, tests]
+        args: [--warnings, info_yaml, info_yaml_validate.py, scripts, tests]
         # Scan those paths whole, so a staged change cannot hide a
         # finding it causes in an unstaged file.
         pass_filenames: false
