@@ -419,8 +419,60 @@ strings and then fail the schema's `type: string`:
 
 Quote such values.
 
+## Surveying the estate
+
+`scripts/survey.py` measures what the corrected schema changes across
+the Linux Foundation's GitHub mirror organisations. It reads the root
+`INFO.yaml` of every public, non-archived, non-fork repository through
+the Contents API and validates each file twice:
+
+- **Old**: the legacy `yaml-verify-schema.py` behaviour. Draft 4 against
+  `schema/info-schema-legacy.yaml`, the upstream schema before the
+  corrections above, with no metaschema check and no `format: uri`
+  checking.
+- **New**: this action's validator core, Draft 2020-12 against the
+  bundled schema with format checking on.
+
+```text
+uv run --locked --script scripts/survey.py
+    [--org ORG ...]             default: onap, o-ran-sc, FDio, opendaylight,
+                                anuket-project, akraino-edge-stack,
+                                edgexfoundry, automotive-grade-linux
+    [--token-env NAME]          default: GITHUB_TOKEN
+    [--old-schema PATH]         default: schema/info-schema-legacy.yaml
+    [--new-schema PATH]         default: schema/info-schema.yaml
+    [--cache-dir DIR]           keep fetched files and reuse them
+    [--output PATH]             default: standard output
+```
+
+- The survey sends a token with every request. It reads the token from
+  the environment variable `--token-env` names, never from the command
+  line, and stops with exit code `2` when that variable is empty. A
+  token with no scopes suffices for public repositories.
+- It waits out rate limits: `Retry-After` on a secondary limit, and
+  `X-RateLimit-Reset` once `X-RateLimit-Remaining` reaches `0`.
+- With `--cache-dir`, each fetched file, or the absence of one, stays on
+  disk, so a run that stops part way resumes without fetching those
+  files again. Delete the directory to start afresh.
+- The report holds one Markdown table per organisation: repository, old
+  verdict, new verdict and, where the two differ, the new findings in
+  full. A totals line follows each table. Repositories without an
+  `INFO.yaml` appear in a separate list and count apart from the
+  failures. A file that is not valid YAML fails both.
+- The script exits `0` when no file regresses, passing the old check
+  and failing the new one, `1` when any does, and `2` when the survey
+  cannot run.
+
+The survey covers the schema checks alone: the schema change does not
+touch the yamllint stage or the declared-repository check.
+
 ## Development
 
 ```bash
 uv run --frozen pytest -q
 ```
+
+`scripts/survey.py` declares the validator's dependencies in its own
+PEP 723 header, locked by `scripts/survey.py.lock`. Refresh that lock
+with `uv lock --script scripts/survey.py` whenever the validator's
+dependencies change.
