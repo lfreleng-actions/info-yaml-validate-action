@@ -14,6 +14,9 @@ requires-python = ">=3.10"
 license = "Apache-2.0"
 dependencies = ["jsonschema[format-nongpl]>=4.23", "PyYAML>=6", "referencing>=0.36"]
 
+# A [tool.uv] table here does not apply when the action runs: it
+# calls uv with --no-config (see AGENTS.md).
+
 [project.scripts]
 info-yaml-validate = "info_yaml.cli:main"
 

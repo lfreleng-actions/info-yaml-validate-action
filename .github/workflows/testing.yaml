@@ -61,7 +61,102 @@ jobs:
         shell: bash
         run: |
           # Run pytest
-          uv run --frozen pytest -q
+          uv run --no-config --frozen pytest -q
+
+  ### The action ignores uv files in the checkout under test ###
+  workspace-files:
+    name: "Workspace .venv, .python-version and uv.toml"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
+        with:
+          config: '@18d9c4446bea555d0783e850f6d295f844fe8f67'  # v0.1.1
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2  # v2.22.2
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 'uses: $/' has the runner fetch this action under _actions, as
+      # for a published action, so the workspace is the caller's
+      # checkout and not the action's directory. Planted here: a .venv
+      # and a .python-version, each naming an interpreter that records
+      # it ran and fails, which setup-uv's 'uv python find' and
+      # 'uv run' would otherwise run, and a uv.toml naming an index
+      # that does not resolve, read by 'uv sync'.
+      # tests/test_action_workspace.py covers Python modules planted in
+      # the workspace, and an action checked out inside it.
+      - name: "Plant uv files in the workspace"
+        shell: bash
+        run: |
+          # Plant uv files in the workspace
+          marker="$RUNNER_TEMP/planted-ran"
+          mkdir -p .venv/bin
+          for interpreter in planted-python .venv/bin/python3 \
+            .venv/bin/python; do
+            cat > "$interpreter" <<EOF
+          #!/bin/sh
+          echo "\$0" >> "$marker"
+          exit 97
+          EOF
+            chmod +x "$interpreter"
+          done
+          printf '%s\n' 'home = /usr/bin' \
+            'include-system-site-packages = false' \
+            'version_info = 3.12.0' > .venv/pyvenv.cfg
+          printf '%s\n' "$GITHUB_WORKSPACE/planted-python" > .python-version
+          cat > uv.toml <<'EOF'
+          [[index]]
+          url = "https://pypi.invalid/simple"
+          default = true
+          EOF
+
+      - name: "Running local action: planted uv files"
+        id: planted
+        uses: $/
+        with:
+          path: "tests/fixtures/valid/INFO.yaml"
+          project: "example-project"
+
+      - name: "Verify real outputs and that nothing planted ran"
+        if: always()
+        shell: bash
+        env:
+          VALID: ${{ steps.planted.outputs.valid }}
+          PROJECT: ${{ steps.planted.outputs.project }}
+          REPOSITORIES: ${{ steps.planted.outputs.repositories }}
+          SCHEMA_ERRORS: ${{ steps.planted.outputs.schema-error-count }}
+          LINT_ERRORS: ${{ steps.planted.outputs.lint-error-count }}
+        run: |
+          # Verify real outputs and that nothing planted ran
+          if [ -e "$RUNNER_TEMP/planted-ran" ]; then
+            echo "Error: a planted file ran:" \
+              "$(cat "$RUNNER_TEMP/planted-ran") ❌"
+            exit 1
+          fi
+          if [ "$VALID" != "true" ] || [ "$PROJECT" != "example-project" ] \
+            || [ "$REPOSITORIES" != "example-project" ] \
+            || [ "$SCHEMA_ERRORS" != "0" ] || [ "$LINT_ERRORS" != "0" ]; then
+            echo "Error: unexpected outputs: valid='$VALID'" \
+              "project='$PROJECT' repositories='$REPOSITORIES'" \
+              "schema-error-count='$SCHEMA_ERRORS'" \
+              "lint-error-count='$LINT_ERRORS' ❌"
+            exit 1
+          fi
+          echo "Planted uv files were ignored ✅"
 
   ### Test the GitHub Action in this Repository ###
   tests:

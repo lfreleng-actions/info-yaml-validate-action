@@ -249,10 +249,10 @@ validator imports nothing from it. yamllint lives in its own `lint`
 dependency group in `pyproject.toml`, pinned and hash-checked through
 `uv.lock`, and not among the validator's dependencies: its PEP 723
 header and script lock do not list it. The composite syncs that group
-alone (`uv sync --locked --no-install-project`, restricted to the
-`lint` group) into a private environment under `RUNNER_TEMP`, and the
-validator runs the `yamllint` executable from that environment by
-absolute path, as a separate process, as a pre-commit hook would,
+alone (`uv sync --no-config --locked --no-install-project`, restricted
+to the `lint` group) into a private environment under `RUNNER_TEMP`,
+and the validator runs the `yamllint` executable from that environment
+by absolute path, as a separate process, as a pre-commit hook would,
 reading its `parsable` output. The `dev` group includes `lint`, so the
 test suite runs the same command. Dependabot's `uv` ecosystem tracks
 the lock, so a yamllint release arrives as a lock bump rather than a
@@ -356,6 +356,23 @@ into five review cycles.
   `uv run --locked` and `uv sync --locked` install those pinned
   versions: the validator and its dependencies from the script lock,
   yamllint and its two dependencies from the `lint` group in `uv.lock`.
+- uv reads no configuration from the checkout under test. Both uv steps
+  pass `--no-config`, and the `setup-uv` step sets `UV_NO_CONFIG`, so a
+  `.python-version` there cannot name the interpreter uv runs, and a
+  `uv.toml` there cannot change the package index. The setting applies
+  to those steps alone and does not reach the caller's later steps.
+- uv runs no interpreter from a `.venv` in the checkout under test.
+  `setup-uv` probes with `uv python find`, which searches its working
+  directory and the parents for a `.venv`, so the step sets
+  `working-directory` to this action's own directory, which for a
+  published action is outside the workspace; that input exports
+  nothing. The step also sets `UV_SYSTEM_PYTHON`, so the probe skips
+  virtual environments, including a workspace `.venv` above an action
+  checked out inside the workspace; like `UV_NO_CONFIG`, it does not
+  reach the caller's later steps. The validation step finds its
+  interpreter from the same directory with `uv python find --system`,
+  which passes over every virtual environment, and gives `uv run` the
+  result by absolute path.
 
 ### What this replaces
 
@@ -422,5 +439,5 @@ Quote such values.
 ## Development
 
 ```bash
-uv run --frozen pytest -q
+uv run --no-config --frozen pytest -q
 ```
