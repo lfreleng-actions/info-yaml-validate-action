@@ -36,11 +36,13 @@ a pull request, not the full set:
 The runtime dependencies live in two places, each with its own lock:
 the PEP 723 header of `info_yaml_validate.py`, locked by
 `info_yaml_validate.py.lock`, and `pyproject.toml`, locked by
-`uv.lock`. The action runs `uv run --locked --script`, which reads the
-script lock and ignores `uv.lock`; the unit tests do the reverse. A
-stale script lock passes `uv run --locked pytest` and first fails in
-the integration job. Change both declarations together and refresh
-both locks:
+`uv.lock`. The action runs `uv run --no-config --locked --script`
+(with `--python` naming the interpreter it found first), which reads
+the script lock and ignores `uv.lock`; most unit tests do the
+reverse. Of the unit tests, `tests/test_action_workspace.py`
+alone runs the action's own steps and so catches a stale script lock;
+the integration job catches it too. Change both declarations together
+and refresh both locks:
 
 ```bash
 uv lock
@@ -54,3 +56,13 @@ alone, which the action syncs from `uv.lock` into a private
 environment and runs as a separate process. Dependabot's `uv`
 ecosystem bumps that pin; the group's `uv.lock` entry alone decides
 its version.
+
+The action's own uv calls pass `--no-config`, and its setup-uv step
+sets `UV_NO_CONFIG`, so that a checkout under test cannot configure
+uv. The same switch makes uv ignore this repository's settings too:
+a `[tool.uv]` table in `pyproject.toml`, or a `uv.toml`, does not
+apply when the action runs, though local `uv` commands still honour
+it. Put any setting the action needs on its uv command lines or in
+the step's `env:` instead. setup-uv reads `cache-dir` from those
+files with its own code; it ignores `required-version`, as the step
+pins `version`.
