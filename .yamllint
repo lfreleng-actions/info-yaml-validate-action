@@ -4,11 +4,13 @@
 
 extends: default
 
-# Vendored verbatim from lfit/releng-global-jjb. Reformatting it to satisfy
-# a line-length rule would defeat the point of copying it unchanged, and
-# would make future comparison against upstream harder.
+# Vendored from lfit/releng-global-jjb, the legacy copy verbatim for the
+# survey to measure against. Reformatting either to satisfy a line-length
+# rule would defeat the point of copying it, and would make future
+# comparison against upstream harder.
 ignore: |
   schema/info-schema.yaml
+  schema/info-schema-legacy.yaml
 
 rules:
   empty-lines:
