@@ -82,7 +82,14 @@ def _starts_uv(words: list[str]) -> bool:
     return "$UV" in words or words[0] in {"uv", "uvx"}
 
 
-@pytest.mark.xfail(strict=True, reason="caller settings reach uv and Python")
+def _starts_python(words: list[str]) -> bool:
+    """A Python started by path, literal or held in a *PYTHON variable."""
+    return bool(
+        re.search(r"(^|/)python[0-9.]*(\.exe)?$", words[0])
+        or re.fullmatch(r"\$\{?[A-Z_]*PYTHON\}?", words[0])
+    )
+
+
 def test_setup_uv_step_is_guarded() -> None:
     """setup-uv runs no interpreter a caller variable can choose."""
     setup = [
@@ -97,7 +104,6 @@ def test_setup_uv_step_is_guarded() -> None:
     assert step.get("env") == SETUP_UV_ENV
 
 
-@pytest.mark.xfail(strict=True, reason="caller settings reach uv and Python")
 def test_python_step_installs_under_an_empty_environment() -> None:
     """The trusted interpreter comes from uv run under 'env -i' alone."""
     python = [step for step in _steps() if step.get("id") == "python"]
@@ -114,7 +120,6 @@ def test_python_step_installs_under_an_empty_environment() -> None:
         ), words
 
 
-@pytest.mark.xfail(strict=True, reason="caller settings reach uv and Python")
 @pytest.mark.parametrize("step", RUN_STEPS, ids=RUN_STEP_IDS)
 def test_run_step_starts_nothing_from_path(step: dict[str, Any]) -> None:
     """No step runs uv, uvx or Python by a name looked up on PATH."""
@@ -122,7 +127,6 @@ def test_run_step_starts_nothing_from_path(step: dict[str, Any]) -> None:
         assert words[0] not in BARE_COMMANDS, (step.get("name"), words)
 
 
-@pytest.mark.xfail(strict=True, reason="caller settings reach uv and Python")
 @pytest.mark.parametrize("step", RUN_STEPS, ids=RUN_STEP_IDS)
 def test_run_step_uv_calls_name_the_trusted_interpreter(
     step: dict[str, Any],
@@ -143,7 +147,6 @@ def test_run_step_uv_calls_name_the_trusted_interpreter(
             assert env.get("PYTHON") == PYTHON_PATH_EXPR, step.get("name")
 
 
-@pytest.mark.xfail(strict=True, reason="caller settings reach uv and Python")
 @pytest.mark.parametrize("step", RUN_STEPS, ids=RUN_STEP_IDS)
 def test_run_step_drops_python_settings_first(step: dict[str, Any]) -> None:
     """PYTHONEXECUTABLE and __PYVENV_LAUNCHER__ act even under -I.
@@ -155,8 +158,7 @@ def test_run_step_drops_python_settings_first(step: dict[str, Any]) -> None:
     starts = [
         position
         for position, words in enumerate(commands)
-        if (_starts_uv(words) and words[:2] != ["env", "-i"])
-        or re.search(r"(^|/)python[0-9.]*$", words[0])
+        if (_starts_uv(words) and words[:2] != ["env", "-i"]) or _starts_python(words)
     ]
     if not starts:
         return
@@ -173,5 +175,26 @@ def test_run_step_drops_python_settings_first(step: dict[str, Any]) -> None:
 def test_run_step_python_starts_are_isolated(step: dict[str, Any]) -> None:
     """A Python started by path runs with -I."""
     for words in _commands(step["run"]):
-        if re.search(r"(^|/)python[0-9.]*$", words[0]):
+        if _starts_python(words):
             assert words[1] == "-I", words
+
+
+def test_validator_interpreter_follows_the_runner_os() -> None:
+    """'uv venv' puts the interpreter under Scripts on Windows, bin elsewhere.
+
+    The validate step names it once, for both the install and the run.
+    """
+    validate = [step for step in _steps() if step.get("id") == "validate"]
+    assert len(validate) == 1
+    step = validate[0]
+    assert step["env"]["VALIDATOR_BIN"] == (
+        "${{ runner.os == 'Windows' && 'Scripts/python.exe' || 'bin/python' }}"
+    )
+    commands = _commands(step["run"])
+    pythons = [words for words in commands if "--python" in words]
+    starts = [words for words in commands if _starts_python(words)]
+    assert ["$VALIDATOR_PYTHON", "-I"] == starts[0][:2], starts
+    assert "$VALIDATOR_PYTHON" in [
+        words[words.index("--python") + 1] for words in pythons
+    ], pythons
+    assert not any("bin/python" in word for words in commands for word in words)

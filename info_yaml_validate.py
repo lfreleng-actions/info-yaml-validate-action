@@ -60,8 +60,16 @@ import os
 import sys
 from pathlib import Path
 
-from info_yaml.validate import fail, run
-from info_yaml.workspace import InfoYamlError
+# The action runs this script under 'python -I', which leaves the
+# script's own directory off sys.path, so the bundled package is put
+# there by absolute path; nothing from the working directory, which is
+# the checkout under test, joins it.
+_ACTION_DIR = str(Path(__file__).resolve().parent)
+if _ACTION_DIR not in sys.path:
+    sys.path.insert(0, _ACTION_DIR)
+
+from info_yaml.validate import fail, run  # noqa: E402
+from info_yaml.workspace import InfoYamlError  # noqa: E402
 
 TRUE_VALUES = frozenset({"true", "1", "yes", "on"})
 FALSE_VALUES = frozenset({"false", "0", "no", "off"})

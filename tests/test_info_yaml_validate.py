@@ -1613,7 +1613,6 @@ def test_path_search_skips_the_current_directory(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="shell-script stand-ins")
-@pytest.mark.xfail(strict=True, reason="yamllint inherits Python settings")
 def test_yamllint_gets_no_python_settings_from_the_caller(
     workspace: Path,
     tmp_path: Path,
