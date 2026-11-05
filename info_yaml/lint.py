@@ -46,6 +46,18 @@ VENV_BIN_DIRS = ("bin", "Scripts")
 # the configuration, and a decoding the preflight did not apply would let
 # a path read differently by the two of them.
 YAMLLINT_ENV_VARS = ("YAMLLINT_CONFIG_FILE", "YAMLLINT_FILE_ENCODING")
+# yamllint is a Python console script, and its interpreter would read
+# PYTHONPATH, PYTHONHOME, PYTHONSTARTUP and the like from the caller's
+# environment: a PYTHONPATH naming the working directory, which is the
+# checkout under test, would import a sitecustomize.py from there. The
+# child drops every such setting and gets the equivalent of 'python -I'
+# instead: no user site directory and no unsafe sys.path entry. Its
+# output is decoded as UTF-8 below, so it writes UTF-8.
+YAMLLINT_PYTHON_ENV = {
+    "PYTHONIOENCODING": "utf-8",
+    "PYTHONNOUSERSITE": "1",
+    "PYTHONSAFEPATH": "1",
+}
 
 # One record of 'yamllint -f parsable' output. The rule identifier is the
 # last parenthesised token; a syntax error carries the literal '(syntax)'.
@@ -256,6 +268,16 @@ def _failure_detail(completed: subprocess.CompletedProcess[str]) -> str:
     return f"exit status {completed.returncode}"
 
 
+def _is_python_setting(name: str) -> bool:
+    """Whether the Python interpreter reads ``name`` from its environment.
+
+    ``__PYVENV_LAUNCHER__`` and ``PYTHONEXECUTABLE`` name the
+    executable it reports as its own on macOS; the rest carry the
+    ``PYTHON`` prefix.
+    """
+    return name.upper().startswith("PYTHON") or name == "__PYVENV_LAUNCHER__"
+
+
 def _executable_in(directory: Path) -> str | None:
     """The yamllint executable in a virtual environment's scripts directory."""
     for name in (YAMLLINT_COMMAND, f"{YAMLLINT_COMMAND}.exe"):
@@ -362,8 +384,9 @@ def lint_yaml(workspace: Path, filepath: str, config: Path | None) -> list[LintF
     env = {
         name: value
         for name, value in os.environ.items()
-        if name not in YAMLLINT_ENV_VARS
+        if name not in YAMLLINT_ENV_VARS and not _is_python_setting(name)
     }
+    env.update(YAMLLINT_PYTHON_ENV)
     try:
         completed = subprocess.run(  # nosec B603 - fixed executable, no shell
             [executable, "-f", "parsable", *config_args, "--", filepath],

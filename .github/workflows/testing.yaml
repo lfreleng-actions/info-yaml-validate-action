@@ -158,6 +158,169 @@ jobs:
           fi
           echo "Planted uv files were ignored ✅"
 
+  ### The caller's environment cannot pick the Python the action runs ###
+  caller-env:
+    name: "Caller environment (${{ matrix.os }}, ${{ matrix.selector }})"
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+        # 'request' names an interpreter outright; 'active-environment'
+        # points at the workspace .venv as an activated one would.
+        selector: [request, active-environment]
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        if: runner.os == 'Linux'
+        with:
+          config: '@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+
+      - name: 'Harden runner (block)'
+        if: runner.os == 'Linux'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # As a caller's earlier step could: bait in the workspace, and
+      # settings exported through GITHUB_ENV that would have uv or
+      # Python run it. Every bait records that it ran.
+      - name: "Plant interpreters, modules and settings"
+        shell: bash
+        env:
+          SELECTOR: ${{ matrix.selector }}
+        run: |
+          # Plant interpreters, modules and settings
+          marker="$RUNNER_TEMP/planted-ran"
+          ws="$GITHUB_WORKSPACE"
+          mkdir -p .venv/bin .venv/conda-meta xdg-bin pkg urllib
+          for bait in .venv/bin/python .venv/bin/python3 \
+            .venv/bin/python3.13 .venv/bin/uv xdg-bin/env xdg-bin/bash; do
+            cat > "$bait" <<EOF
+          #!/bin/sh
+          echo "\$0" >> "$marker"
+          exit 1
+          EOF
+            chmod +x "$bait"
+          done
+          printf '%s\n' 'home = /usr/bin' \
+            'include-system-site-packages = false' \
+            'version_info = 3.13.0' > .venv/pyvenv.cfg
+          for module in json.py base64.py sitecustomize.py \
+            usercustomize.py urllib/__init__.py; do
+            printf 'with open("%s", "a") as handle:\n' "$marker" > "$module"
+            printf '    handle.write(__file__ + "\\n")\n' >> "$module"
+          done
+
+          # The control: without isolation the bait runs
+          PYTHONPATH="pkg:." python3 -c 'import json' || true
+          PATH="$ws/.venv/bin:$PATH" python3 -c 'pass' || true
+          if ! grep -q '/\.venv/bin/python3$' "$marker" ||
+            ! grep -q '/json\.py$' "$marker"; then
+            echo "Error: the planted bait did not run without isolation ❌"
+            exit 1
+          fi
+          rm -f "$marker"
+
+          arch="$(uname -m)"
+          if [ "$arch" = "arm64" ]; then arch="aarch64"; fi
+          {
+            echo "PATH=$ws/.venv/bin:$PATH"
+            echo "PYTHONPATH=pkg:."
+            echo "PYTHONHOME=$ws/.venv"
+            echo "PYTHONUSERBASE=$ws/.venv"
+            echo "PYTHONSTARTUP=$ws/sitecustomize.py"
+            echo "PYTHONEXECUTABLE=$ws/.venv/bin/python3"
+            echo "__PYVENV_LAUNCHER__=$ws/.venv/bin/python3"
+            echo "UV_NO_CACHE=1"
+            echo "UV_PYTHON_ARCH=$arch"
+            echo "UV_PYTHON_INSTALL_MIRROR=https://127.0.0.1:9"
+            echo "XDG_BIN_HOME=$ws/xdg-bin"
+            if [ "$SELECTOR" = "request" ]; then
+              echo "UV_PYTHON=$ws/.venv/bin/python3"
+              echo "UV_PYTHON_SEARCH_PATH=$ws/.venv/bin"
+              echo "UV_PYTHON_INSTALL_DIR=$ws/uv-python"
+              echo "UV_PYTHON_PREFERENCE=only-system"
+            else
+              # UV_PYTHON stays unset, so it cannot mask the
+              # active-environment lookup.
+              echo "VIRTUAL_ENV=$ws/.venv"
+              echo "CONDA_PREFIX=$ws/.venv"
+              echo "CONDA_DEFAULT_ENV=base"
+              echo "UV_INTERNAL__PARENT_INTERPRETER=$ws/.venv/bin/python3"
+              echo "UV_INTERNAL__TEST_PYTHON_MANAGED=1"
+              echo "UV_CACHE_DIR=$ws/.uv-cache"
+            fi
+          } >> "$GITHUB_ENV"
+
+      - name: "Running local action: cold"
+        id: cold
+        uses: $/
+        with:
+          path: "tests/fixtures/valid/INFO.yaml"
+          project: "example-project"
+
+      # The action's Python and environments now exist
+      - name: "Running local action: warm"
+        id: warm
+        uses: $/
+        with:
+          path: "tests/fixtures/valid/INFO.yaml"
+          project: "example-project"
+
+      - name: "Verify real outputs and that no bait ran"
+        if: always()
+        shell: bash
+        env:
+          COLD: >-
+            ${{ steps.cold.outputs.valid }}
+            ${{ steps.cold.outputs.project }}
+            ${{ steps.cold.outputs.repositories }}
+            ${{ steps.cold.outputs.schema-error-count }}
+            ${{ steps.cold.outputs.lint-error-count }}
+          WARM: >-
+            ${{ steps.warm.outputs.valid }}
+            ${{ steps.warm.outputs.project }}
+            ${{ steps.warm.outputs.repositories }}
+            ${{ steps.warm.outputs.schema-error-count }}
+            ${{ steps.warm.outputs.lint-error-count }}
+        run: |
+          # Verify real outputs and that no bait ran
+          status=0
+          if [ -e "$RUNNER_TEMP/planted-ran" ]; then
+            echo "Error: planted bait ran:" \
+              "$(cat "$RUNNER_TEMP/planted-ran") ❌"
+            status=1
+          fi
+          case ":$PATH:" in
+            *":$GITHUB_WORKSPACE/xdg-bin:"*)
+              echo "Error: the caller's XDG_BIN_HOME is on PATH ❌"
+              status=1 ;;
+          esac
+          expected="true example-project example-project 0 0"
+          for run in COLD WARM; do
+            if [ "${!run}" != "$expected" ]; then
+              echo "Error: unexpected $run outputs: '${!run}' ❌"
+              status=1
+            fi
+          done
+          if [ "$status" -eq 0 ]; then
+            echo "The caller's environment chose nothing ✅"
+          fi
+          exit "$status"
+
   ### Test the GitHub Action in this Repository ###
   tests:
     name: "Test local GitHub Action"

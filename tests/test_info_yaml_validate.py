@@ -1612,6 +1612,55 @@ def test_path_search_skips_the_current_directory(
     assert "from-checkout" not in out
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="shell-script stand-ins")
+def test_yamllint_gets_no_python_settings_from_the_caller(
+    workspace: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """yamllint's interpreter reads no PYTHON* setting the caller exported.
+
+    A PYTHONPATH naming the checkout under test would have the console
+    script's interpreter import a sitecustomize.py from there. The child
+    gets the settings 'python -I' implies instead.
+    """
+    env_dir = tmp_path / "lint"
+    (env_dir / "bin").mkdir(parents=True)
+    script = env_dir / "bin" / "yamllint"
+    names = (
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "PYTHONSTARTUP",
+        "PYTHONEXECUTABLE",
+        "__PYVENV_LAUNCHER__",
+        "PYTHONNOUSERSITE",
+        "PYTHONSAFEPATH",
+        "PYTHONIOENCODING",
+    )
+    report = " ".join(f"{name}=${{{name}-unset}}" for name in names)
+    script.write_text(
+        f"#!/bin/sh\nprintf 'INFO.yaml:1:1: [warning] %s (truthy)\\n' \"{report}\"\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("YAMLLINT_ENV_DIR", str(env_dir))
+    for name in names[:5]:
+        monkeypatch.setenv(name, str(workspace))
+    monkeypatch.setenv("PYTHONIOENCODING", "latin-1")
+    monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
+    monkeypatch.delenv("PYTHONSAFEPATH", raising=False)
+    code, records, _, out = _run_main(
+        workspace, monkeypatch, capsys, LINT_FAILURE.read_text(encoding="utf-8")
+    )
+    assert code == 0
+    assert records["valid"] == "true"
+    for name in names[:5]:
+        assert f"{name}=unset" in out
+    assert "PYTHONNOUSERSITE=1" in out
+    assert "PYTHONSAFEPATH=1" in out
+    assert "PYTHONIOENCODING=utf-8" in out
+
+
 def test_action_trims_its_path_and_schema_inputs(
     workspace: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -119,8 +119,8 @@ file's formatting. The job summary records each skip.
 The action publishes all five outputs for input and validation failures
 it handles itself, so a caller running the step under `continue-on-error`
 reads `valid=false` rather than an empty string. A failure in the
-surrounding composite — `setup-uv` failing, or `uv run` unable to install
-the locked dependencies — happens before the validator starts, and leaves
+surrounding composite — `setup-uv` failing, or uv unable to install
+Python or the locked dependencies — happens before the validator starts, and leaves
 the outputs unset. Callers branching on `valid` should treat an empty
 value as a failed step rather than a verdict.
 
@@ -304,10 +304,11 @@ into five review cycles.
   workspace, and refuses any `$ref` pointing outside the document;
   yamllint lints a file on disk and fetches nothing. This covers the
   validation step alone: the composite still runs `setup-uv`, which may
-  download the `uv` binary, `uv sync --locked`, which installs the
-  locked yamllint, and `uv run --locked`, which installs the pinned
-  dependencies when the runner has no cache. All three fetch pinned,
-  immutable content; the validator fetches nothing.
+  download the `uv` binary, `uv python install`, which downloads the
+  Python build uv pins, `uv sync --locked`, which installs the locked
+  yamllint, and `uv pip install --require-hashes`, which installs the
+  script lock's pinned dependencies, when the runner has no cache. All
+  four fetch pinned, immutable content; the validator fetches nothing.
 - **External schema references get refused.** jsonschema 4.26 retrieves
   unresolved `$ref` targets over the network by default, raising a
   `DeprecationWarning` and nothing more. A caller-supplied schema could
@@ -353,26 +354,46 @@ into five review cycles.
   mis-spelling such as `enabled` fails the run rather than disabling a
   gate without saying so.
 - `uv.lock` and `info_yaml_validate.py.lock` pin every dependency, and
-  `uv run --locked` and `uv sync --locked` install those pinned
-  versions: the validator and its dependencies from the script lock,
-  yamllint and its two dependencies from the `lint` group in `uv.lock`.
-- uv reads no configuration from the checkout under test. Both uv steps
-  pass `--no-config`, and the `setup-uv` step sets `UV_NO_CONFIG`, so a
+  the action installs those pinned versions: the validator's
+  dependencies through `uv export --locked --script` and a
+  hash-checked `uv pip install`, yamllint and its two dependencies
+  through `uv sync --locked` from the `lint` group in `uv.lock`.
+- uv reads no configuration from the checkout under test. The action's
+  uv calls pass `--no-config` or run with `UV_NO_CONFIG`, as the
+  `setup-uv` step does, so a
   `.python-version` there cannot name the interpreter uv runs, and a
   `uv.toml` there cannot change the package index. The setting applies
   to those steps alone and does not reach the caller's later steps.
-- uv runs no interpreter from a `.venv` in the checkout under test.
-  `setup-uv` probes with `uv python find`, which searches its working
-  directory and the parents for a `.venv`, so the step sets
-  `working-directory` to this action's own directory, which for a
-  published action is outside the workspace; that input exports
-  nothing. The step also sets `UV_SYSTEM_PYTHON`, so the probe skips
-  virtual environments, including a workspace `.venv` above an action
-  checked out inside the workspace; like `UV_NO_CONFIG`, it does not
-  reach the caller's later steps. The validation step finds its
-  interpreter from the same directory with `uv python find --system`,
-  which passes over every virtual environment, and gives `uv run` the
-  result by absolute path.
+- The caller's environment does not choose the Python the action runs.
+  A composite action inherits the caller job's environment, so a
+  `PATH`, `UV_PYTHON`, `VIRTUAL_ENV`, `CONDA_PREFIX` or `PYTHONPATH`
+  exported by an earlier step, or a `.venv` in the checkout under
+  test, could otherwise pick it. The `setup-uv` step runs in this
+  action's own directory, with its own `tool-bin-dir`, no cache, and
+  an invalid `UV_PYTHON_PREFERENCE`, so its `uv python find` probe
+  refuses its arguments and runs no interpreter. The next step has uv
+  install its own pinned Python 3.13 under `RUNNER_TEMP`, running
+  uv under `env -i` with a short allow-list of proxy and certificate
+  settings, and confirms the result sits in that directory. Every
+  later uv call names that interpreter by absolute path with
+  `--python`, and calls uv by the path `setup-uv` reports, never
+  through `PATH`.
+- The action trusts the caller's `PATH`. The settings above stop a
+  `PATH` entry from choosing the Python the action runs, but the
+  runner finds `bash` on `PATH` for every `shell: bash` step, and
+  `setup-uv` runs `ldd` and `tar` from it, and the action's own steps
+  find `env` and other helpers there. A caller that puts a directory from its
+  checkout on `PATH` already runs that directory's code, and no
+  composite action can prevent it.
+- Those steps unset every `PYTHON*` setting and `__PYVENV_LAUNCHER__`
+  first: Python reads `PYTHONEXECUTABLE` and `__PYVENV_LAUNCHER__`
+  even under `-I`, and either moves its prefix to a `.venv` they name.
+  The validator then runs from its private environment with
+  `python -I`, so neither `PYTHONPATH` nor a module in the working
+  directory reaches it; the script puts its own directory on
+  `sys.path` to find the `info_yaml` package. yamllint, a console
+  script, runs with no `PYTHON*` setting from the caller and with
+  `PYTHONNOUSERSITE` and `PYTHONSAFEPATH` set, which match `-I`.
 
 ### What this replaces
 
