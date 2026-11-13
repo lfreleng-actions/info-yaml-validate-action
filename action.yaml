@@ -76,6 +76,25 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # With UV_NO_MODIFY_PATH set, setup-uv leaves its own uv off PATH
+    # and its bare "uv python find" then runs whatever uv the caller's
+    # PATH holds. A composite action inherits the caller's environment
+    # and no step can unset a variable for a later 'uses:' step, so
+    # refuse to run instead.
+    - name: "Refuse an inherited UV_NO_MODIFY_PATH"
+      shell: bash
+      run: |
+        # Refuse an inherited UV_NO_MODIFY_PATH, in any case or value.
+        # A bracket pattern, not ${name^^}: macOS runs Bash 3.2.
+        for name in $(compgen -e); do
+          case "$name" in
+            [Uu][Vv]_[Nn][Oo]_[Mm][Oo][Dd][Ii][Ff][Yy]_[Pp][Aa][Tt][Hh])
+              echo "Error: unset $name before calling this action ❌"
+              exit 1
+              ;;
+          esac
+        done
+
     # setup-uv's only uv call for these inputs is "uv python find",
     # whose result it executes. An invalid preference makes uv refuse
     # its arguments before any lookup; setup-uv then reports the
