@@ -371,7 +371,10 @@ into five review cycles.
   test, could otherwise pick it. The `setup-uv` step runs in this
   action's own directory, with its own `tool-bin-dir`, no cache, and
   an invalid `UV_PYTHON_PREFERENCE`, so its `uv python find` probe
-  refuses its arguments and runs no interpreter. The next step has uv
+  refuses its arguments and runs no interpreter. A step before it
+  fails when the caller sets `UV_NO_MODIFY_PATH`, which would keep
+  setup-uv's own uv off `PATH` and let that probe run the caller's
+  uv. The next step has uv
   install its own pinned Python 3.13 under `RUNNER_TEMP`, running
   uv under `env -i` with a short allow-list of proxy and certificate
   settings, and confirms the result sits in that directory. Every

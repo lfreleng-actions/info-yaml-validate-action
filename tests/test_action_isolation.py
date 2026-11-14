@@ -15,8 +15,11 @@ against planted interpreters and modules.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import shutil
+import subprocess  # nosec B404 - runs the action's refusal step
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +46,7 @@ PYTHON_PATH_EXPR = "${{ steps.python.outputs.path }}"
 # Command words that start uv or a Python interpreter when looked up on
 # PATH.
 BARE_COMMANDS = frozenset({"uv", "uvx", "python", "python3", "pip", "pip3"})
+BASH = shutil.which("bash")
 
 
 def _steps() -> list[dict[str, Any]]:
@@ -102,6 +106,59 @@ def test_setup_uv_step_is_guarded() -> None:
     assert step.get("id") == "setup-uv"
     assert step.get("with") == SETUP_UV_WITH
     assert step.get("env") == SETUP_UV_ENV
+
+
+def test_setup_uv_follows_a_no_modify_path_refusal() -> None:
+    """An earlier step fails when the caller sets UV_NO_MODIFY_PATH."""
+    steps = _steps()
+    index = next(
+        position
+        for position, step in enumerate(steps)
+        if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+    )
+    refusals = [
+        step
+        for step in steps[:index]
+        if "UV_NO_MODIFY_PATH" in step.get("run", "")
+        and re.search(r"\bexit 1\b", step["run"])
+    ]
+    assert refusals
+    for step in refusals:
+        assert not step.get("if")
+        assert not step.get("continue-on-error")
+
+
+@pytest.mark.skipif(BASH is None, reason="bash is needed on PATH")
+@pytest.mark.parametrize(
+    ("caller_env", "refused"),
+    [
+        ({}, False),
+        ({"UV_NO_MODIFY_PATH_X": "1"}, False),
+        ({"UV_NO_MODIFY_PATH": "1"}, True),
+        ({"UV_NO_MODIFY_PATH": ""}, True),
+        ({"uv_no_modify_path": "0"}, True),
+        ({"Uv_No_Modify_Path": "1"}, True),
+    ],
+)
+def test_no_modify_path_refusal_runs(caller_env: dict[str, str], refused: bool) -> None:
+    """The refusal step fails on the variable, in any case, and on nothing else."""
+    assert BASH is not None
+    steps = [
+        step
+        for step in _steps()
+        if step.get("name") == "Refuse an inherited UV_NO_MODIFY_PATH"
+    ]
+    assert len(steps) == 1
+    result = subprocess.run(  # nosec B603 - the step's own script
+        [BASH, "--noprofile", "--norc", "-eo", "pipefail", "-c", steps[0]["run"]],
+        env={"PATH": os.environ.get("PATH", ""), **caller_env},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == (1 if refused else 0), result.stdout + result.stderr
+    if refused:
+        assert f"unset {next(iter(caller_env))} " in result.stdout
 
 
 def test_python_step_installs_under_an_empty_environment() -> None:
